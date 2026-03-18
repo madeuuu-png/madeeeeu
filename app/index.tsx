@@ -12,11 +12,12 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { CreditCard, ArrowRight, Crown, Heart } from "lucide-react-native";
+import NetInfo from "@react-native-community/netinfo";
 
 import { supabase } from '../lib/core/supabase/supabase';
 import { storageAdapter } from "@/lib/core/storage/storage.adapter";
+import { existeCedulaLocal } from '../lib/core/database/database';
 
-// ✅ Lista de cédulas admin — cámbiala aquí si cambian
 const ADMINS = [
   "0105181424",
   "0106650344",
@@ -28,6 +29,7 @@ const ADMINS = [
 
 export default function Index() {
   const [cedula, setCedula] = useState("");
+  const [cargando, setCargando] = useState(false);
   const router = useRouter();
 
   const handleLogin = async () => {
@@ -38,30 +40,48 @@ export default function Index() {
       return;
     }
 
+    setCargando(true);
+
     try {
-      const { data, error } = await supabase
-        .from("estudiantes")
-        .select("*")
-        .eq("NumDocumento", ced);
+      const net = await NetInfo.fetch();
 
-      if (error) {
-        alert("Error al consultar la base de datos: " + error.message);
-        return;
+      if (net.isConnected) {
+        // ── CON INTERNET → consulta Supabase ──────────────────
+        const { data, error } = await supabase
+          .from("estudiantes")
+          .select("*")
+          .eq("NumDocumento", ced);
+
+        if (error) {
+          alert("Error al consultar la base de datos: " + error.message);
+          return;
+        }
+
+        if (!data || data.length === 0) {
+          alert("❌ Cédula no registrada");
+          return;
+        }
+
+      } else {
+        // ── SIN INTERNET → verifica en SQLite local ───────────
+        const existe = existeCedulaLocal(ced);
+        if (!existe) {
+          alert("❌ Cédula no encontrada. Necesitas internet para el primer ingreso.");
+          return;
+        }
       }
 
-      if (!data || data.length === 0) {
-        alert("❌ Cédula no registrada");
-        return;
-      }
-
-      // Guardar cédula y si es admin
+      // Guardar sesión
       await storageAdapter.setItem("numDocumento", ced);
       const esAdmin = ADMINS.includes(ced);
       await storageAdapter.setItem("esAdmin", esAdmin ? "true" : "false");
 
       router.replace("/home");
+
     } catch (err) {
       alert("Hubo un error inesperado, intenta nuevamente");
+    } finally {
+      setCargando(false);
     }
   };
 
@@ -108,12 +128,15 @@ export default function Index() {
             </View>
 
             <TouchableOpacity
-              style={styles.button}
+              style={[styles.button, cargando && { opacity: 0.7 }]}
               onPress={handleLogin}
               activeOpacity={0.8}
+              disabled={cargando}
             >
-              <Text style={styles.buttonText}>Ingresar</Text>
-              <ArrowRight color="white" size={20} />
+              <Text style={styles.buttonText}>
+                {cargando ? "Verificando..." : "Ingresar"}
+              </Text>
+              {!cargando && <ArrowRight color="white" size={20} />}
             </TouchableOpacity>
 
             <View style={styles.linksContainer}>
@@ -137,47 +160,20 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#FCE4EC" },
   scrollContent: { flexGrow: 1, justifyContent: "center", padding: 24, minHeight: "100%" },
   content: { flex: 1, justifyContent: "center", alignItems: "center", zIndex: 10 },
-  circle1: {
-    position: "absolute", width: 300, height: 300, borderRadius: 150,
-    backgroundColor: "#F48FB1", opacity: 0.2, top: -100, left: -50,
-  },
-  circle2: {
-    position: "absolute", width: 200, height: 200, borderRadius: 100,
-    backgroundColor: "#EC407A", opacity: 0.15, bottom: -50, right: -30,
-  },
-  circle3: {
-    position: "absolute", width: 150, height: 150, borderRadius: 75,
-    backgroundColor: "#F8BBD0", opacity: 0.3, top: 200, right: 20,
-  },
+  circle1: { position: "absolute", width: 300, height: 300, borderRadius: 150, backgroundColor: "#F48FB1", opacity: 0.2, top: -100, left: -50 },
+  circle2: { position: "absolute", width: 200, height: 200, borderRadius: 100, backgroundColor: "#EC407A", opacity: 0.15, bottom: -50, right: -30 },
+  circle3: { position: "absolute", width: 150, height: 150, borderRadius: 75, backgroundColor: "#F8BBD0", opacity: 0.3, top: 200, right: 20 },
   logoContainer: { alignItems: "center", marginBottom: 40 },
-  logoCircle: {
-    width: 100, height: 100, borderRadius: 50, backgroundColor: "#EC407A",
-    justifyContent: "center", alignItems: "center", marginBottom: 16,
-    shadowColor: "#EC407A", shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.3, shadowRadius: 16, elevation: 8,
-  },
+  logoCircle: { width: 100, height: 100, borderRadius: 50, backgroundColor: "#EC407A", justifyContent: "center", alignItems: "center", marginBottom: 16, shadowColor: "#EC407A", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.3, shadowRadius: 16, elevation: 8 },
   appName: { fontSize: 32, fontWeight: "bold", color: "#C2185B", marginBottom: 8 },
   subtitle: { fontSize: 16, color: "#EC407A", fontWeight: "500" },
-  card: {
-    backgroundColor: "white", borderRadius: 30, padding: 32, width: "100%",
-    maxWidth: 400, shadowColor: "#EC407A", shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.2, shadowRadius: 20, elevation: 10,
-  },
+  card: { backgroundColor: "white", borderRadius: 30, padding: 32, width: "100%", maxWidth: 400, shadowColor: "#EC407A", shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.2, shadowRadius: 20, elevation: 10 },
   title: { fontSize: 28, fontWeight: "bold", color: "#C2185B", marginBottom: 8, textAlign: "center" },
   description: { fontSize: 14, color: "#F48FB1", marginBottom: 32, textAlign: "center" },
-  inputContainer: {
-    flexDirection: "row", alignItems: "center", backgroundColor: "#FCE4EC",
-    borderRadius: 20, paddingHorizontal: 20, paddingVertical: 16, marginBottom: 24,
-    borderWidth: 2, borderColor: "#F8BBD0",
-  },
+  inputContainer: { flexDirection: "row", alignItems: "center", backgroundColor: "#FCE4EC", borderRadius: 20, paddingHorizontal: 20, paddingVertical: 16, marginBottom: 24, borderWidth: 2, borderColor: "#F8BBD0" },
   inputIconComponent: { marginRight: 12 },
   input: { flex: 1, fontSize: 16, color: "#C2185B", fontWeight: "600" },
-  button: {
-    backgroundColor: "#EC407A", borderRadius: 20, paddingVertical: 18, paddingHorizontal: 32,
-    flexDirection: "row", justifyContent: "center", alignItems: "center", marginBottom: 24,
-    shadowColor: "#EC407A", shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4, shadowRadius: 12, elevation: 6, gap: 8,
-  },
+  button: { backgroundColor: "#EC407A", borderRadius: 20, paddingVertical: 18, paddingHorizontal: 32, flexDirection: "row", justifyContent: "center", alignItems: "center", marginBottom: 24, shadowColor: "#EC407A", shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.4, shadowRadius: 12, elevation: 6, gap: 8 },
   buttonText: { color: "white", fontSize: 18, fontWeight: "bold" },
   linksContainer: { flexDirection: "row", justifyContent: "center", alignItems: "center" },
   link: { color: "#F48FB1", fontSize: 13, fontWeight: "500" },

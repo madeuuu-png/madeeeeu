@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ScrollView, StyleSheet, Text, TouchableOpacity, View,
   ActivityIndicator, TextInput, Alert, Modal
@@ -8,95 +8,169 @@ import {
 import {
   ShieldCheck, ArrowLeft, Package, RefreshCw, Users,
   History, AlertTriangle, CheckCircle, Trash2, UserPlus,
-  ChevronDown, ChevronUp, X
+  ChevronDown, ChevronUp, X, Bluetooth, BluetoothOff
 } from 'lucide-react-native';
+import { BleManager, Device } from 'react-native-ble-plx';
 import { supabase } from '../lib/core/supabase/supabase';
 
-export default function Admin() {
-  const router = useRouter();
+const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
+const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
+const NOMBRE_ESP32        = 'MAKANA_DISPENSADOR';
 
-  // Inventario
-  const [motor1, setMotor1] = useState(0);
-  const [motor2, setMotor2] = useState(0);
-  const [cargandoInv, setCargandoInv] = useState(true);
+export default function Admin() {
+  const router     = useRouter();
+  const bleManager = useRef(new BleManager()).current;
+
+  // Inventario — solo lo que responde el ESP32
+  const [motor1, setMotor1] = useState<number | null>(null);
+  const [motor2, setMotor2] = useState<number | null>(null);
+
+  // Bluetooth
+  const [bleConectado,  setBleConectado]  = useState(false);
+  const [bleConectando, setBleConectando] = useState(false);
+  const dispositivoRef = useRef<Device | null>(null);
 
   // Historial
-  const [historial, setHistorial] = useState<any[]>([]);
-  const [mostrarHistorial, setMostrarHistorial] = useState(false);
-  const [cargandoHist, setCargandoHist] = useState(false);
+  const [historial,        setHistorial]        = useState<any[]>([]);
+  const [mostrarHistorial, setMostrarHistorial]  = useState(false);
+  const [cargandoHist,     setCargandoHist]      = useState(false);
 
   // Estudiantes
-  const [estudiantes, setEstudiantes] = useState<any[]>([]);
+  const [estudiantes,        setEstudiantes]        = useState<any[]>([]);
   const [mostrarEstudiantes, setMostrarEstudiantes] = useState(false);
-  const [cargandoEst, setCargandoEst] = useState(false);
-  const [modalAgregar, setModalAgregar] = useState(false);
-  const [nuevoDoc, setNuevoDoc] = useState("");
-  const [nuevoNombre, setNuevoNombre] = useState("");
-  const [guardando, setGuardando] = useState(false);
+  const [cargandoEst,        setCargandoEst]        = useState(false);
+  const [modalAgregar,       setModalAgregar]       = useState(false);
+  const [nuevoDoc,           setNuevoDoc]           = useState('');
+  const [nuevoNombre,        setNuevoNombre]        = useState('');
+  const [guardando,          setGuardando]          = useState(false);
 
   useEffect(() => {
-    // Verificar que sea admin
     const verificar = async () => {
-      const flag = await AsyncStorage.getItem("esAdmin");
-      if (flag !== "true") { router.replace('/home'); return; }
-      cargarInventario();
+      const flag = await AsyncStorage.getItem('esAdmin');
+      if (flag !== 'true') { router.replace('/home'); return; }
     };
     verificar();
 
-    const intervalo = setInterval(cargarInventario, 5000);
-    return () => clearInterval(intervalo);
+    return () => { bleManager.destroy(); };
   }, []);
 
-  // ── Inventario ──────────────────────────────────────────
-  const cargarInventario = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("inventario")
-        .select("motor1_toallas, motor2_toallas")
-        .order('id', { ascending: false })
-        .limit(1)
-        .single();
-      if (!error && data) {
-        setMotor1(data.motor1_toallas);
-        setMotor2(data.motor2_toallas);
+  // ── Conectar Bluetooth ──────────────────────────────────
+  const conectarBLE = () => {
+    if (bleConectando || bleConectado) return;
+    setBleConectando(true);
+
+    bleManager.startDeviceScan(null, null, async (error, device) => {
+      if (error) {
+        setBleConectando(false);
+        Alert.alert('Error', '¿Está el Bluetooth activado?');
+        return;
       }
-    } catch { }
-    finally { setCargandoInv(false); }
+
+      if (device?.name === NOMBRE_ESP32) {
+        bleManager.stopDeviceScan();
+        try {
+          const conectado = await device.connect();
+          await conectado.discoverAllServicesAndCharacteristics();
+          dispositivoRef.current = conectado;
+          setBleConectado(true);
+          setBleConectando(false);
+
+          conectado.onDisconnected(() => {
+            setBleConectado(false);
+            dispositivoRef.current = null;
+            setMotor1(null);
+            setMotor2(null);
+          });
+
+          // Pide el estado actual del inventario al conectarse
+          pedirInventarioBLE(conectado);
+
+        } catch {
+          setBleConectando(false);
+          Alert.alert('Error', 'No se pudo conectar al dispensador');
+        }
+      }
+    });
+
+    setTimeout(() => {
+      bleManager.stopDeviceScan();
+      if (!bleConectado) setBleConectando(false);
+    }, 10000);
   };
 
-  // Botón "Inventario recargado" — solo actualiza la BD con valores máximos
+  // ── Pedir inventario actual al ESP32 ────────────────────
+  const pedirInventarioBLE = async (device: Device) => {
+    try {
+      const base64 = btoa('STATUS');
+      await device.writeCharacteristicWithResponseForService(
+        SERVICE_UUID, CHARACTERISTIC_UUID, base64
+      );
+
+      const suscripcion = device.monitorCharacteristicForService(
+        SERVICE_UUID, CHARACTERISTIC_UUID,
+        (err, characteristic) => {
+          suscripcion.remove();
+          if (err || !characteristic?.value) return;
+          const respuesta = atob(characteristic.value);
+          // Respuesta: "OK:7:8"
+          if (respuesta.startsWith('OK:')) {
+            const partes = respuesta.split(':');
+            setMotor1(parseInt(partes[1]));
+            setMotor2(parseInt(partes[2]));
+          }
+        }
+      );
+      setTimeout(() => suscripcion.remove(), 5000);
+    } catch { /* silencioso */ }
+  };
+
+  // ── Enviar comando BLE ──────────────────────────────────
+  const enviarComandoBLE = (comando: string): Promise<string | null> => {
+    return new Promise(async (resolve) => {
+      const device = dispositivoRef.current;
+      if (!device) { resolve(null); return; }
+
+      try {
+        await device.writeCharacteristicWithResponseForService(
+          SERVICE_UUID, CHARACTERISTIC_UUID, btoa(comando)
+        );
+
+        const suscripcion = device.monitorCharacteristicForService(
+          SERVICE_UUID, CHARACTERISTIC_UUID,
+          (err, characteristic) => {
+            suscripcion.remove();
+            if (err || !characteristic?.value) { resolve(null); return; }
+            resolve(atob(characteristic.value));
+          }
+        );
+        setTimeout(() => { suscripcion.remove(); resolve(null); }, 5000);
+      } catch { resolve(null); }
+    });
+  };
+
+  // ── Recargar inventario (solo BLE, sin Supabase) ────────
   const marcarInventarioRecargado = async () => {
+    if (!bleConectado) {
+      Alert.alert('Sin conexión', 'Conecta el dispensador por Bluetooth primero');
+      return;
+    }
+
     Alert.alert(
-      "Confirmar recarga",
-      "¿Confirmas que el dispensador fue recargado físicamente? Esto actualizará el inventario a máximo.",
+      'Confirmar recarga',
+      '¿Confirmas que el dispensador fue recargado físicamente?',
       [
-        { text: "Cancelar", style: "cancel" },
+        { text: 'Cancelar', style: 'cancel' },
         {
-          text: "Sí, recargar",
+          text: 'Sí, recargar',
           onPress: async () => {
-            try {
-              // Obtener el id del registro actual
-              const { data: actual } = await supabase
-                .from("inventario")
-                .select("id")
-                .order('id', { ascending: false })
-                .limit(1)
-                .single();
-
-              if (!actual) { Alert.alert("Error", "No se encontró el registro de inventario"); return; }
-
-              const { error } = await supabase
-                .from("inventario")
-                .update({ motor1_toallas: 9, motor2_toallas: 9 })
-                .eq('id', actual.id);
-
-              if (error) { Alert.alert("Error", "No se pudo actualizar el inventario"); return; }
-
-              setMotor1(9);
-              setMotor2(9);
-              Alert.alert("✅ Listo", "Inventario actualizado a máximo (9+9 toallas)");
-            } catch {
-              Alert.alert("Error", "Algo salió mal");
+            const respuesta = await enviarComandoBLE('RECARGAR');
+            if (respuesta?.startsWith('RECARGADO:')) {
+              const partes = respuesta.split(':');
+              setMotor1(parseInt(partes[1]));
+              setMotor2(parseInt(partes[2]));
+              Alert.alert('✅ Listo', 'Inventario recargado a 8+8 toallas');
+            } else {
+              Alert.alert('Error', 'No se pudo comunicar con el dispensador');
             }
           }
         }
@@ -104,31 +178,31 @@ export default function Admin() {
     );
   };
 
-  // ── Historial ────────────────────────────────────────────
+  // ── Historial ───────────────────────────────────────────
   const cargarHistorial = async () => {
     if (mostrarHistorial) { setMostrarHistorial(false); return; }
     setCargandoHist(true);
     try {
       const { data, error } = await supabase
-        .from("estudiantes")
-        .select("NombreCompleto, NumDocumento, UltimaEntrega")
-        .not("UltimaEntrega", "is", null)
-        .order("UltimaEntrega", { ascending: false })
+        .from('estudiantes')
+        .select('NombreCompleto, NumDocumento, UltimaEntrega')
+        .not('UltimaEntrega', 'is', null)
+        .order('UltimaEntrega', { ascending: false })
         .limit(50);
       if (!error && data) setHistorial(data);
     } catch { }
     finally { setCargandoHist(false); setMostrarHistorial(true); }
   };
 
-  // ── Estudiantes ──────────────────────────────────────────
+  // ── Estudiantes ─────────────────────────────────────────
   const cargarEstudiantes = async () => {
     if (mostrarEstudiantes) { setMostrarEstudiantes(false); return; }
     setCargandoEst(true);
     try {
       const { data, error } = await supabase
-        .from("estudiantes")
-        .select("NumDocumento, NombreCompleto, UltimaEntrega")
-        .order("NombreCompleto", { ascending: true });
+        .from('estudiantes')
+        .select('NumDocumento, NombreCompleto, UltimaEntrega')
+        .order('NombreCompleto', { ascending: true });
       if (!error && data) setEstudiantes(data);
     } catch { }
     finally { setCargandoEst(false); setMostrarEstudiantes(true); }
@@ -136,15 +210,15 @@ export default function Admin() {
 
   const eliminarEstudiante = (doc: string, nombre: string) => {
     Alert.alert(
-      "Eliminar estudiante",
+      'Eliminar estudiante',
       `¿Eliminar a ${nombre}? Esta acción no se puede deshacer.`,
       [
-        { text: "Cancelar", style: "cancel" },
+        { text: 'Cancelar', style: 'cancel' },
         {
-          text: "Eliminar", style: "destructive",
+          text: 'Eliminar', style: 'destructive',
           onPress: async () => {
-            const { error } = await supabase.from("estudiantes").delete().eq("NumDocumento", doc);
-            if (error) { Alert.alert("Error", "No se pudo eliminar"); return; }
+            const { error } = await supabase.from('estudiantes').delete().eq('NumDocumento', doc);
+            if (error) { Alert.alert('Error', 'No se pudo eliminar'); return; }
             setEstudiantes(prev => prev.filter(e => e.NumDocumento !== doc));
           }
         }
@@ -153,30 +227,29 @@ export default function Admin() {
   };
 
   const agregarEstudiante = async () => {
-    if (nuevoDoc.length !== 10) { Alert.alert("Error", "La cédula debe tener 10 dígitos"); return; }
-    if (!nuevoNombre.trim()) { Alert.alert("Error", "El nombre no puede estar vacío"); return; }
+    if (nuevoDoc.length !== 10) { Alert.alert('Error', 'La cédula debe tener 10 dígitos'); return; }
+    if (!nuevoNombre.trim())    { Alert.alert('Error', 'El nombre no puede estar vacío'); return; }
     setGuardando(true);
     try {
       const { error } = await supabase
-        .from("estudiantes")
+        .from('estudiantes')
         .insert({ NumDocumento: nuevoDoc.trim(), NombreCompleto: nuevoNombre.trim() });
       if (error) {
-        Alert.alert("Error", error.code === "23505" ? "Esa cédula ya existe" : error.message);
+        Alert.alert('Error', error.code === '23505' ? 'Esa cédula ya existe' : error.message);
         return;
       }
-      Alert.alert("✅ Listo", `${nuevoNombre} agregada correctamente`);
+      Alert.alert('✅ Listo', `${nuevoNombre} agregada correctamente`);
       setModalAgregar(false);
-      setNuevoDoc(""); setNuevoNombre("");
-      // Refrescar lista si está abierta
+      setNuevoDoc(''); setNuevoNombre('');
       if (mostrarEstudiantes) cargarEstudiantes();
     } catch {
-      Alert.alert("Error", "Algo salió mal");
+      Alert.alert('Error', 'Algo salió mal');
     }
     finally { setGuardando(false); }
   };
 
-  const totalToallas = motor1 + motor2;
-  const sinToallas = totalToallas === 0;
+  const totalToallas = (motor1 ?? 0) + (motor2 ?? 0);
+  const sinToallas   = bleConectado && totalToallas === 0;
 
   return (
     <ScrollView style={styles.scrollView}>
@@ -195,24 +268,47 @@ export default function Admin() {
           <ShieldCheck color="#C2185B" size={28} />
         </View>
 
-        {/* ── INVENTARIO ── */}
+        {/* ── INVENTARIO + BLE ── */}
         <View style={styles.sectionCard}>
           <View style={styles.sectionHeader}>
             <Package color="#C2185B" size={24} style={{ marginRight: 10 }} />
-            <Text style={styles.sectionTitle}>Inventario</Text>
+            <Text style={styles.sectionTitle}>Inventario del dispensador</Text>
           </View>
 
-          {cargandoInv ? (
-            <ActivityIndicator color="#EC407A" style={{ marginVertical: 16 }} />
-          ) : (
+          {/* Tarjeta BLE */}
+          <TouchableOpacity
+            style={[styles.bleCard, bleConectado ? styles.bleCardOk : styles.bleCardOff]}
+            onPress={conectarBLE}
+            activeOpacity={bleConectado ? 1 : 0.8}
+            disabled={bleConectado || bleConectando}
+          >
+            {bleConectando ? (
+              <>
+                <ActivityIndicator size="small" color="#E65100" style={{ marginRight: 10 }} />
+                <Text style={styles.bleTextOff}>Buscando dispensador...</Text>
+              </>
+            ) : bleConectado ? (
+              <>
+                <Bluetooth color="#2E7D32" size={20} style={{ marginRight: 10 }} />
+                <Text style={styles.bleTextOk}>Dispensador conectado ✓</Text>
+              </>
+            ) : (
+              <>
+                <BluetoothOff color="#E65100" size={20} style={{ marginRight: 10 }} />
+                <Text style={styles.bleTextOff}>Toca para conectar el dispensador</Text>
+              </>
+            )}
+          </TouchableOpacity>
+
+          {/* Inventario — solo si está conectado */}
+          {bleConectado && motor1 !== null && motor2 !== null ? (
             <>
-              {/* Alerta específica para admins */}
               {sinToallas ? (
                 <View style={styles.alertCardRed}>
                   <AlertTriangle color="#C62828" size={22} style={{ marginRight: 10 }} />
                   <View>
                     <Text style={styles.alertTitleRed}>⚠️ Dispensador vacío</Text>
-                    <Text style={styles.alertSubRed}>Ambos motores en 0. Recarga urgente necesaria.</Text>
+                    <Text style={styles.alertSubRed}>Ambos motores en 0. Recarga urgente.</Text>
                   </View>
                 </View>
               ) : totalToallas <= 4 ? (
@@ -244,12 +340,15 @@ export default function Admin() {
                 </View>
               </View>
 
-              {/* Botón recargar inventario */}
               <TouchableOpacity style={styles.reloadBtn} onPress={marcarInventarioRecargado} activeOpacity={0.8}>
                 <RefreshCw color="white" size={20} style={{ marginRight: 10 }} />
                 <Text style={styles.reloadBtnText}>Marcar inventario como recargado</Text>
               </TouchableOpacity>
             </>
+          ) : bleConectado ? (
+            <ActivityIndicator color="#EC407A" style={{ marginVertical: 16 }} />
+          ) : (
+            <Text style={styles.emptyText}>Conecta el dispensador para ver el inventario</Text>
           )}
         </View>
 
@@ -261,7 +360,7 @@ export default function Admin() {
             {cargandoHist
               ? <ActivityIndicator size="small" color="#EC407A" style={{ marginLeft: 'auto' }} />
               : mostrarHistorial
-                ? <ChevronUp color="#C2185B" size={20} style={{ marginLeft: 'auto' }} />
+                ? <ChevronUp   color="#C2185B" size={20} style={{ marginLeft: 'auto' }} />
                 : <ChevronDown color="#C2185B" size={20} style={{ marginLeft: 'auto' }} />
             }
           </TouchableOpacity>
@@ -297,12 +396,11 @@ export default function Admin() {
             {cargandoEst
               ? <ActivityIndicator size="small" color="#EC407A" style={{ marginLeft: 'auto' }} />
               : mostrarEstudiantes
-                ? <ChevronUp color="#C2185B" size={20} style={{ marginLeft: 'auto' }} />
+                ? <ChevronUp   color="#C2185B" size={20} style={{ marginLeft: 'auto' }} />
                 : <ChevronDown color="#C2185B" size={20} style={{ marginLeft: 'auto' }} />
             }
           </TouchableOpacity>
 
-          {/* Botón agregar siempre visible */}
           <TouchableOpacity style={styles.addBtn} onPress={() => setModalAgregar(true)} activeOpacity={0.8}>
             <UserPlus color="#C2185B" size={18} style={{ marginRight: 8 }} />
             <Text style={styles.addBtnText}>Agregar estudiante</Text>
@@ -395,102 +493,68 @@ export default function Admin() {
 
 const styles = StyleSheet.create({
   scrollView: { flex: 1, backgroundColor: '#FCE4EC' },
-  container: { flex: 1, padding: 24, paddingTop: 60, paddingBottom: 40 },
-  circle1: { position: 'absolute', width: 250, height: 250, borderRadius: 125, backgroundColor: '#F48FB1', opacity: 0.12, top: -80, right: -50 },
+  container:  { flex: 1, padding: 24, paddingTop: 60, paddingBottom: 40 },
+  circle1: { position: 'absolute', width: 250, height: 250, borderRadius: 125, backgroundColor: '#F48FB1', opacity: 0.12, top: -80,  right: -50 },
   circle2: { position: 'absolute', width: 200, height: 200, borderRadius: 100, backgroundColor: '#EC407A', opacity: 0.08, bottom: 100, left: -60 },
 
-  header: { flexDirection: 'row', alignItems: 'center', marginBottom: 24, zIndex: 10 },
-  backBtn: {
-    width: 40, height: 40, borderRadius: 20, backgroundColor: 'white',
-    justifyContent: 'center', alignItems: 'center', marginRight: 12,
-    shadowColor: '#EC407A', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 4, elevation: 3,
-  },
+  header:      { flexDirection: 'row', alignItems: 'center', marginBottom: 24, zIndex: 10 },
+  backBtn:     { width: 40, height: 40, borderRadius: 20, backgroundColor: 'white', justifyContent: 'center', alignItems: 'center', marginRight: 12, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 4, elevation: 3 },
   headerTitle: { fontSize: 26, fontWeight: 'bold', color: '#C2185B' },
 
-  sectionCard: {
-    backgroundColor: 'white', borderRadius: 20, padding: 20, marginBottom: 16,
-    shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15, shadowRadius: 8, elevation: 4, zIndex: 10,
-  },
-  sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#C2185B' },
+  sectionCard:   { backgroundColor: 'white', borderRadius: 20, padding: 20, marginBottom: 16, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 4, zIndex: 10 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  sectionTitle:  { fontSize: 18, fontWeight: 'bold', color: '#C2185B' },
 
-  // Alertas inventario
-  alertCardRed: { backgroundColor: '#FFEBEE', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#EF5350' },
-  alertTitleRed: { fontSize: 15, fontWeight: 'bold', color: '#C62828' },
-  alertSubRed: { fontSize: 13, color: '#D32F2F', marginTop: 2 },
+  bleCard:    { borderRadius: 12, padding: 12, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5 },
+  bleCardOk:  { backgroundColor: '#E8F5E9', borderColor: '#66BB6A' },
+  bleCardOff: { backgroundColor: '#FFF3E0', borderColor: '#FFA726' },
+  bleTextOk:  { color: '#2E7D32', fontSize: 14, fontWeight: '500' },
+  bleTextOff: { color: '#E65100', fontSize: 14, fontWeight: '500' },
+
+  alertCardRed:    { backgroundColor: '#FFEBEE', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#EF5350' },
+  alertTitleRed:   { fontSize: 15, fontWeight: 'bold', color: '#C62828' },
+  alertSubRed:     { fontSize: 13, color: '#D32F2F', marginTop: 2 },
   alertCardOrange: { backgroundColor: '#FFF3E0', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#FFA726' },
-  alertTitleOrange: { fontSize: 15, fontWeight: 'bold', color: '#E65100' },
-  alertSubOrange: { fontSize: 13, color: '#EF6C00', marginTop: 2 },
-  alertCardGreen: { backgroundColor: '#E8F5E9', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#66BB6A' },
+  alertTitleOrange:{ fontSize: 15, fontWeight: 'bold', color: '#E65100' },
+  alertSubOrange:  { fontSize: 13, color: '#EF6C00', marginTop: 2 },
+  alertCardGreen:  { backgroundColor: '#E8F5E9', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#66BB6A' },
   alertTitleGreen: { fontSize: 14, fontWeight: 'bold', color: '#2E7D32' },
 
-  motorRow: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', marginBottom: 16 },
-  motorBox: { alignItems: 'center', flex: 1 },
-  motorLabel: { fontSize: 14, color: '#F48FB1', fontWeight: '600', marginBottom: 4 },
-  motorNum: { fontSize: 40, fontWeight: 'bold', color: '#EC407A' },
+  motorRow:      { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', marginBottom: 16 },
+  motorBox:      { alignItems: 'center', flex: 1 },
+  motorLabel:    { fontSize: 14, color: '#F48FB1', fontWeight: '600', marginBottom: 4 },
+  motorNum:      { fontSize: 40, fontWeight: 'bold', color: '#EC407A' },
   motorNumEmpty: { color: '#BDBDBD' },
-  motorSub: { fontSize: 12, color: '#F48FB1' },
-  motorDivider: { width: 2, height: 60, backgroundColor: '#F8BBD0' },
+  motorSub:      { fontSize: 12, color: '#F48FB1' },
+  motorDivider:  { width: 2, height: 60, backgroundColor: '#F8BBD0' },
 
-  reloadBtn: {
-    backgroundColor: '#C2185B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#C2185B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4,
-  },
+  reloadBtn:     { backgroundColor: '#C2185B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', shadowColor: '#C2185B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
   reloadBtnText: { color: 'white', fontWeight: 'bold', fontSize: 15 },
 
-  // Historial
-  historialItem: {
-    flexDirection: 'row', alignItems: 'center', paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: '#FCE4EC',
-  },
+  historialItem:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FCE4EC' },
   historialNombre: { fontSize: 14, fontWeight: '600', color: '#C2185B' },
-  historialDoc: { fontSize: 12, color: '#F48FB1', marginTop: 2 },
-  historialFecha: { fontSize: 12, color: '#EC407A', fontWeight: '600' },
-  emptyText: { color: '#F48FB1', fontSize: 14, textAlign: 'center', paddingVertical: 12 },
+  historialDoc:    { fontSize: 12, color: '#F48FB1', marginTop: 2 },
+  historialFecha:  { fontSize: 12, color: '#EC407A', fontWeight: '600' },
+  emptyText:       { color: '#F48FB1', fontSize: 14, textAlign: 'center', paddingVertical: 12 },
 
-  // Estudiantes
-  addBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    backgroundColor: '#FCE4EC', borderRadius: 12, paddingVertical: 12,
-    marginTop: 12, borderWidth: 1.5, borderColor: '#F8BBD0',
-  },
+  addBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FCE4EC', borderRadius: 12, paddingVertical: 12, marginTop: 4, borderWidth: 1.5, borderColor: '#F8BBD0' },
   addBtnText: { color: '#C2185B', fontWeight: 'bold', fontSize: 14 },
-  estudianteItem: {
-    flexDirection: 'row', alignItems: 'center', paddingVertical: 10,
-    borderBottomWidth: 1, borderBottomColor: '#FCE4EC',
-  },
-  estudianteNombre: { fontSize: 14, fontWeight: '600', color: '#C2185B' },
-  estudianteDoc: { fontSize: 12, color: '#F48FB1', marginTop: 2 },
-  deleteBtn: {
-    width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFEBEE',
-    justifyContent: 'center', alignItems: 'center',
-  },
 
-  backBottomBtn: {
-    backgroundColor: '#EC407A', borderRadius: 16, padding: 18,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    marginTop: 8, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3, shadowRadius: 8, elevation: 4, zIndex: 10,
-  },
+  estudianteItem:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FCE4EC' },
+  estudianteNombre: { fontSize: 14, fontWeight: '600', color: '#C2185B' },
+  estudianteDoc:    { fontSize: 12, color: '#F48FB1', marginTop: 2 },
+  deleteBtn:        { width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFEBEE', justifyContent: 'center', alignItems: 'center' },
+
+  backBottomBtn:  { backgroundColor: '#EC407A', borderRadius: 16, padding: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 8, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4, zIndex: 10 },
   backBottomText: { color: 'white', fontSize: 16, fontWeight: 'bold' },
 
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
-  modalCard: { backgroundColor: 'white', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 28, paddingBottom: 40 },
-  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
-  modalTitle: { fontSize: 22, fontWeight: 'bold', color: '#C2185B' },
-  modalLabel: { fontSize: 14, color: '#C2185B', fontWeight: '600', marginBottom: 8 },
-  modalInput: {
-    backgroundColor: '#FCE4EC', borderRadius: 16, paddingHorizontal: 18, paddingVertical: 14,
-    marginBottom: 20, borderWidth: 2, borderColor: '#F8BBD0',
-  },
-  modalInputText: { fontSize: 16, color: '#C2185B', fontWeight: '600' },
-  modalSaveBtn: {
-    backgroundColor: '#EC407A', borderRadius: 16, paddingVertical: 16,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4,
-  },
-  modalSaveBtnText: { color: 'white', fontSize: 18, fontWeight: 'bold' },
+  modalOverlay:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  modalCard:       { backgroundColor: 'white', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 28, paddingBottom: 40 },
+  modalHeader:     { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
+  modalTitle:      { fontSize: 22, fontWeight: 'bold', color: '#C2185B' },
+  modalLabel:      { fontSize: 14, color: '#C2185B', fontWeight: '600', marginBottom: 8 },
+  modalInput:      { backgroundColor: '#FCE4EC', borderRadius: 16, paddingHorizontal: 18, paddingVertical: 14, marginBottom: 20, borderWidth: 2, borderColor: '#F8BBD0' },
+  modalInputText:  { fontSize: 16, color: '#C2185B', fontWeight: '600' },
+  modalSaveBtn:    { backgroundColor: '#EC407A', borderRadius: 16, paddingVertical: 16, alignItems: 'center', justifyContent: 'center', shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  modalSaveBtnText:{ color: 'white', fontSize: 18, fontWeight: 'bold' },
 });

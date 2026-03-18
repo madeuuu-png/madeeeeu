@@ -14,14 +14,15 @@
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/icon.png",
-        "backgroundImage": "./assets/images/icon.png",
-        "monochromeImage": "./assets/images/icon.png"
+        "foregroundImage": "./assets/images/icon.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.makana3.madeeeeu",
-      "googleServicesFile": "./google-services.json"
+      "googleServicesFile": "./google-services.json",
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
     },
     "web": {
       "output": "static",
@@ -41,7 +42,20 @@
           }
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-sqlite",
+      "@react-native-community/netinfo",
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": [
+            "peripheral",
+            "central"
+          ],
+          "bluetoothAlwaysPermissionDescription": "Permitir que Makana use Bluetooth para conectar con el dispensador."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
