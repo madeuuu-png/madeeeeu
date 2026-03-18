@@ -43,5 +43,5 @@ app-example
 /ios
 /android
 
-google-services.json
-makanaapp-service-account.json
+!google-services.json
+!makanaapp-service-account.json
