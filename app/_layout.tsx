@@ -1,6 +1,6 @@
 import { Stack } from "expo-router";
 import { useEffect } from "react";
-import { inicializarDB } from '../lib/core/database/database';
+import { inicializarDB } from '../lib/core/dataBase/database';
 
 export default function RootLayout() {
 

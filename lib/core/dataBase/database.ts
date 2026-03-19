@@ -5,7 +5,7 @@
 
 import * as SQLite from 'expo-sqlite';
 import NetInfo from '@react-native-community/netinfo';
-import { supabase } from '../lib/core/supabase/supabase';
+import { supabase } from '../supabase/supabase';
 
 const db = SQLite.openDatabaseSync('makana.db');
 

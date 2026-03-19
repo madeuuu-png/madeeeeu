@@ -44,7 +44,6 @@
       ],
       "expo-web-browser",
       "expo-sqlite",
-      "@react-native-community/netinfo",
       [
         "react-native-ble-plx",
         {
@@ -58,8 +57,7 @@
       ]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "router": {},

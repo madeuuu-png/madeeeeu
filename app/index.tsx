@@ -16,7 +16,7 @@ import NetInfo from "@react-native-community/netinfo";
 
 import { supabase } from '../lib/core/supabase/supabase';
 import { storageAdapter } from "@/lib/core/storage/storage.adapter";
-import { existeCedulaLocal } from '../lib/core/database/database';
+import { existeCedulaLocal } from '../lib/core/dataBase/database';
 
 const ADMINS = [
   "0105181424",

@@ -13,17 +13,18 @@ import {
   guardarEntregaLocal,
   obtenerUltimaEntregaLocal,
   sincronizarConSupabase,
-} from '../lib/core/database/database';
+} from '../lib/core/dataBase/database';
 
 // ─── UUIDs BLE — deben coincidir exactamente con el ESP32 ───
 const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
 const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
 const NOMBRE_ESP32        = 'MAKANA_DISPENSADOR';
 
+// BleManager global — fuera del componente para que no se destruya entre renders
+const bleManager = new BleManager();
+
 export default function Home() {
   const router     = useRouter();
-  const bleManager = useRef(new BleManager()).current;
-
   const [numDocumento, setNumDocumento] = useState('');
   const [nombre,       setNombre]       = useState('');
   const [hayToallas,   setHayToallas]   = useState(true);
@@ -70,7 +71,7 @@ export default function Home() {
 
     return () => {
       clearInterval(intervalo);
-      bleManager.destroy();
+      bleManager.stopDeviceScan();
     };
   }, []);
 
@@ -94,6 +95,28 @@ export default function Home() {
   // ── Conectar Bluetooth ─────────────────────────────────────
   const conectarBLE = () => {
     if (bleConectando || bleConectado) return;
+
+    // Si el dispositivo sigue conectado en memoria, reconectar directo
+    const device = dispositivoRef.current;
+    if (device) {
+      device.isConnected().then((conectado) => {
+        if (conectado) {
+          setBleConectado(true);
+          return;
+        }
+        dispositivoRef.current = null;
+        iniciarEscaneo();
+      }).catch(() => {
+        dispositivoRef.current = null;
+        iniciarEscaneo();
+      });
+      return;
+    }
+
+    iniciarEscaneo();
+  };
+
+  const iniciarEscaneo = () => {
     setBleConectando(true);
 
     bleManager.startDeviceScan(null, null, async (error, device) => {
@@ -241,7 +264,7 @@ export default function Home() {
   const handleLogout = async () => {
     await AsyncStorage.removeItem('numDocumento');
     await AsyncStorage.removeItem('esAdmin');
-    bleManager.destroy();
+    bleManager.stopDeviceScan();
     router.replace('/');
   };
 
