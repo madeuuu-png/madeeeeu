@@ -1,12 +1,16 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View, ActivityIndicator, Alert } from 'react-native';
+import {
+  ScrollView, StyleSheet, Text, TouchableOpacity, View,
+  ActivityIndicator, Alert, PermissionsAndroid, Platform
+} from 'react-native';
 import {
   Sparkles, Flower2, Ribbon, Info, LogOut,
   Bluetooth, BluetoothOff, AlertTriangle, ShieldCheck
 } from 'lucide-react-native';
-import { BleManager, Device } from 'react-native-ble-plx';
+import { BleManager, Device, Subscription } from 'react-native-ble-plx';
+import { Buffer } from 'buffer';
 import NetInfo from '@react-native-community/netinfo';
 import { supabase } from '../lib/core/supabase/supabase';
 import {
@@ -15,28 +19,27 @@ import {
   sincronizarConSupabase,
 } from '../lib/core/dataBase/database';
 
-// ─── UUIDs BLE — deben coincidir exactamente con el ESP32 ───
 const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
 const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
-const NOMBRE_ESP32        = 'MAKANA_DISPENSADOR';
+const ESP32_MAC           = '08:D1:F9:C8:D5:3E'; // MAC del ESP32 — más confiable que el nombre
 
-// BleManager global — fuera del componente para que no se destruya entre renders
+// Global para que no muera entre renders
 const bleManager = new BleManager();
 
 export default function Home() {
-  const router     = useRouter();
+  const router = useRouter();
+
   const [numDocumento, setNumDocumento] = useState('');
   const [nombre,       setNombre]       = useState('');
   const [hayToallas,   setHayToallas]   = useState(true);
   const [cargando,     setCargando]     = useState(true);
   const [esAdmin,      setEsAdmin]      = useState(false);
-
-  // Estado Bluetooth
   const [bleConectado,  setBleConectado]  = useState(false);
   const [bleConectando, setBleConectando] = useState(false);
+
   const dispositivoRef = useRef<Device | null>(null);
 
-  // ── Al arrancar ────────────────────────────────────────────
+  // ── Inicialización ─────────────────────────────────────────
   useEffect(() => {
     const init = async () => {
       const doc       = await AsyncStorage.getItem('numDocumento');
@@ -45,8 +48,6 @@ export default function Home() {
 
       if (doc) {
         setNumDocumento(doc);
-
-        // Intenta cargar el nombre si hay internet
         const net = await NetInfo.fetch();
         if (net.isConnected) {
           const { data } = await supabase
@@ -58,144 +59,163 @@ export default function Home() {
         }
       }
 
-      await cargarInventario();
+      // Inventario ya no está en Supabase — lo trae el ESP32 por BLE
+      setCargando(false);
 
-      // Intenta subir entregas pendientes que quedaron offline
+      // Subir entregas pendientes
       sincronizarConSupabase();
     };
 
     init();
-
-    // Refresca inventario cada 10s
-    const intervalo = setInterval(cargarInventario, 10000);
-
-    return () => {
-      clearInterval(intervalo);
-      bleManager.stopDeviceScan();
-    };
+    return () => { bleManager.stopDeviceScan(); };
   }, []);
 
-  // ── Inventario ─────────────────────────────────────────────
-  const cargarInventario = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('inventario')
-        .select('motor1_toallas, motor2_toallas')
-        .order('id', { ascending: false })
-        .limit(1)
-        .single();
-
-      if (!error && data) {
-        setHayToallas(data.motor1_toallas + data.motor2_toallas > 0);
-      }
-    } catch { /* sin internet, se queda con el estado anterior */ }
-    finally { setCargando(false); }
-  };
-
-  // ── Conectar Bluetooth ─────────────────────────────────────
-  const conectarBLE = () => {
+  // ── Conectar BLE ───────────────────────────────────────────
+  const conectarBLE = async () => {
     if (bleConectando || bleConectado) return;
 
-    // Si el dispositivo sigue conectado en memoria, reconectar directo
-    const device = dispositivoRef.current;
-    if (device) {
-      device.isConnected().then((conectado) => {
-        if (conectado) {
-          setBleConectado(true);
-          return;
-        }
-        dispositivoRef.current = null;
-        iniciarEscaneo();
-      }).catch(() => {
-        dispositivoRef.current = null;
-        iniciarEscaneo();
-      });
-      return;
+    // Si ya hay dispositivo guardado, verificar si sigue conectado
+    if (dispositivoRef.current) {
+      try {
+        const sigue = await dispositivoRef.current.isConnected();
+        if (sigue) { setBleConectado(true); return; }
+      } catch { /* nada */ }
+      dispositivoRef.current = null;
     }
 
+    pedirPermisosYEscanear();
+  };
+
+  const pedirPermisosYEscanear = async () => {
+    if (Platform.OS === 'android') {
+      const granted = await PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      ]);
+      const todosOk = Object.values(granted).every(
+        v => v === PermissionsAndroid.RESULTS.GRANTED
+      );
+      if (!todosOk) {
+        Alert.alert('Permisos', 'Activa Bluetooth y Ubicación en ajustes de la app.');
+        return;
+      }
+    }
     iniciarEscaneo();
   };
 
-  const iniciarEscaneo = () => {
+  const iniciarEscaneo = async () => {
+    // Verificar que el Bluetooth esté encendido antes de escanear
+    const estado = await bleManager.state();
+    console.log('[BLE] Estado:', estado);
+
+    if (estado !== 'PoweredOn') {
+      setBleConectando(false);
+      Alert.alert(
+        'Bluetooth apagado',
+        'Por favor activa el Bluetooth e intenta de nuevo.'
+      );
+      return;
+    }
+
     setBleConectando(true);
 
-    bleManager.startDeviceScan(null, null, async (error, device) => {
+    // Filtrar por SERVICE_UUID para encontrar solo el ESP32
+    bleManager.startDeviceScan([SERVICE_UUID], null, async (error, device) => {
       if (error) {
         setBleConectando(false);
-        Alert.alert('Error', '¿Está el Bluetooth activado?');
+        Alert.alert('Error Bluetooth', 'Error al escanear: ' + error.message);
         return;
       }
 
-      if (device?.name === NOMBRE_ESP32) {
-        bleManager.stopDeviceScan();
+      // Log para debug — útil para ver qué llega
+      console.log('[BLE] Dispositivo:', device?.name, '|', device?.localName, '| ID:', device?.id);
 
-        try {
-          const conectado = await device.connect();
-          await conectado.discoverAllServicesAndCharacteristics();
-          dispositivoRef.current = conectado;
-          setBleConectado(true);
-          setBleConectando(false);
+      // Conectar por MAC (más confiable) O por nombre como backup
+      const esPorMAC    = device?.id === ESP32_MAC;
+      const nombre      = device?.name || device?.localName || '';
+      const esPorNombre = nombre.includes('MAKANA');
 
-          // Detecta si se desconecta
-          conectado.onDisconnected(() => {
-            setBleConectado(false);
-            dispositivoRef.current = null;
-          });
+      if (!esPorMAC && !esPorNombre) return;
 
-        } catch {
-          setBleConectando(false);
-          Alert.alert('Error', 'No se pudo conectar al dispensador');
-        }
+      bleManager.stopDeviceScan();
+
+      try {
+        const conectado = await device!.connect();
+        await new Promise(r => setTimeout(r, 500)); // delay para que ESP32 esté listo
+        await conectado.discoverAllServicesAndCharacteristics();
+        dispositivoRef.current = conectado;
+        setBleConectado(true);
+        setBleConectando(false);
+
+        conectado.onDisconnected(() => {
+          setBleConectado(false);
+          dispositivoRef.current = null;
+        });
+
+      } catch (e) {
+        setBleConectando(false);
+        Alert.alert('Error', 'No se pudo conectar al dispensador. Reinicia el ESP32 e intenta de nuevo.');
       }
     });
 
-    // Si en 10s no encontró nada, para de buscar
+    // Timeout de 12 segundos
     setTimeout(() => {
       bleManager.stopDeviceScan();
-      if (!bleConectado) setBleConectando(false);
-    }, 10000);
+      setBleConectando(false);
+    }, 12000);
   };
 
-  // ── Enviar comando al ESP32 y esperar respuesta ────────────
+  // ── Enviar comando BLE ─────────────────────────────────────
   const enviarComandoBLE = (comando: string): Promise<string | null> => {
     return new Promise(async (resolve) => {
       const device = dispositivoRef.current;
-      if (!device) { resolve(null); return; }
+      if (!device) return resolve(null);
+
+      let suscripcion: Subscription | null = null;
+
+      const timeout = setTimeout(() => {
+        suscripcion?.remove();
+        resolve(null);
+      }, 6000);
 
       try {
-        const base64 = btoa(comando);
-        await device.writeCharacteristicWithResponseForService(
+        // Primero suscribirse, luego escribir
+        suscripcion = device.monitorCharacteristicForService(
           SERVICE_UUID,
           CHARACTERISTIC_UUID,
-          base64
-        );
-
-        // Espera la respuesta por notify
-        const suscripcion = device.monitorCharacteristicForService(
-          SERVICE_UUID,
-          CHARACTERISTIC_UUID,
-          (err, characteristic) => {
-            suscripcion.remove();
-            if (err || !characteristic?.value) { resolve(null); return; }
-            resolve(atob(characteristic.value));
+          (err, char) => {
+            clearTimeout(timeout);
+            suscripcion?.remove();
+            if (err || !char?.value) return resolve(null);
+            const respuesta = Buffer.from(char.value, 'base64').toString('utf-8');
+            resolve(respuesta);
           }
         );
 
-        // Timeout de 5s
-        setTimeout(() => { suscripcion.remove(); resolve(null); }, 5000);
+        // Pequeño delay para que el monitor esté listo
+        await new Promise(r => setTimeout(r, 100));
+
+        await device.writeCharacteristicWithResponseForService(
+          SERVICE_UUID,
+          CHARACTERISTIC_UUID,
+          Buffer.from(comando).toString('base64')
+        );
 
       } catch {
+        clearTimeout(timeout);
+        suscripcion?.remove();
         resolve(null);
       }
     });
   };
 
-  // ── Verificar cooldown de 28 días ──────────────────────────
+  // ── Verificar cooldown ─────────────────────────────────────
   const verificarCooldown = async (): Promise<boolean> => {
     const hoy = new Date();
 
-    // 1. Revisa primero en SQLite local (funciona offline)
-    const fechaLocal = obtenerUltimaEntregaLocal(numDocumento);
+    // 1. SQLite local (funciona offline)
+    const fechaLocal = obtenerUltimaEntregaLocal(numDocumento); // síncrona, sin await
     if (fechaLocal) {
       const dias = (hoy.getTime() - new Date(fechaLocal).getTime()) / (1000 * 60 * 60 * 24);
       if (dias < 28) {
@@ -204,7 +224,7 @@ export default function Home() {
       }
     }
 
-    // 2. Si hay internet, también verifica en Supabase
+    // 2. Supabase (si hay internet)
     const net = await NetInfo.fetch();
     if (net.isConnected) {
       const { data } = await supabase
@@ -225,17 +245,14 @@ export default function Home() {
     return true;
   };
 
-  // ── SACAR KIT ──────────────────────────────────────────────
+  // ── Sacar Kit ──────────────────────────────────────────────
   const handleSacarKit = async () => {
     if (!numDocumento) { Alert.alert('Error', 'No se encontró tu número de documento'); return; }
-    if (!hayToallas)   { Alert.alert('Sin kits', 'Contacta al personal del colegio'); return; }
-    if (!bleConectado) { Alert.alert('Sin conexión', 'Conecta el dispensador primero'); return; }
+    if (!bleConectado) { Alert.alert('Conexión', 'Conecta el dispensador primero.'); return; }
 
-    // 1. Verificar cooldown
     const puedeRetirar = await verificarCooldown();
     if (!puedeRetirar) return;
 
-    // 2. Mandar comando por Bluetooth
     const respuesta = await enviarComandoBLE('DISPENSAR');
 
     if (!respuesta || respuesta === 'SIN_TOALLAS') {
@@ -244,20 +261,16 @@ export default function Home() {
       return;
     }
 
-    // Respuesta: "OK:7:8" → actualiza el estado local del inventario
     if (respuesta.startsWith('OK:')) {
       const partes = respuesta.split(':');
       setHayToallas(parseInt(partes[1]) + parseInt(partes[2]) > 0);
+
+      const fecha = new Date().toISOString().split('T')[0];
+      guardarEntregaLocal(numDocumento, fecha);
+      sincronizarConSupabase();
+
+      Alert.alert('✅ ¡Listo!', 'Tu kit fue dispensado. ¡Cuídate mucho!');
     }
-
-    // 3. Guardar entrega en SQLite SIEMPRE (con o sin internet)
-    const fecha = new Date().toISOString().split('T')[0];
-    guardarEntregaLocal(numDocumento, fecha);
-
-    // 4. Intentar sincronizar con Supabase ahora mismo
-    sincronizarConSupabase();
-
-    Alert.alert('✅ ¡Listo!', 'Tu kit fue dispensado correctamente.');
   };
 
   // ── Logout ─────────────────────────────────────────────────
@@ -285,13 +298,9 @@ export default function Home() {
           <Text style={styles.welcomeSubtitle}>Estamos aquí para cuidarte</Text>
         </View>
 
-        {/* Botón admin — solo admins */}
+        {/* Admin */}
         {esAdmin && (
-          <TouchableOpacity
-            style={styles.adminTab}
-            onPress={() => router.push('/admin')}
-            activeOpacity={0.8}
-          >
+          <TouchableOpacity style={styles.adminTab} onPress={() => router.push('/admin')} activeOpacity={0.8}>
             <ShieldCheck color="white" size={22} style={{ marginRight: 10 }} />
             <Text style={styles.adminTabText}>Panel Administración</Text>
           </TouchableOpacity>
@@ -309,7 +318,7 @@ export default function Home() {
         {cargando ? (
           <View style={styles.loadingCard}>
             <ActivityIndicator size="small" color="#EC407A" />
-            <Text style={styles.loadingText}>Verificando disponibilidad...</Text>
+            <Text style={styles.loadingText}>Cargando...</Text>
           </View>
         ) : (
           <View style={[styles.statusCard, hayToallas ? styles.statusCardOk : styles.statusCardEmpty]}>
@@ -318,7 +327,7 @@ export default function Home() {
                 <Text style={styles.statusEmoji}>✅</Text>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.statusTitle, { color: '#2E7D32' }]}>Kits disponibles</Text>
-                  <Text style={[styles.statusSub,   { color: '#388E3C' }]}>Puedes solicitar tu kit ahora</Text>
+                  <Text style={[styles.statusSub, { color: '#388E3C' }]}>Puedes solicitar tu kit ahora</Text>
                 </View>
               </>
             ) : (
@@ -326,19 +335,19 @@ export default function Home() {
                 <AlertTriangle color="#C62828" size={28} style={{ marginRight: 12 }} />
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.statusTitle, { color: '#C62828' }]}>Sin kits disponibles</Text>
-                  <Text style={[styles.statusSub,   { color: '#D32F2F' }]}>Contacta al personal del colegio</Text>
+                  <Text style={[styles.statusSub, { color: '#D32F2F' }]}>Contacta al personal del colegio</Text>
                 </View>
               </>
             )}
           </View>
         )}
 
-        {/* Tarjeta Bluetooth — toca para conectar */}
+        {/* Bluetooth */}
         <TouchableOpacity
           style={[styles.bleCard, bleConectado ? styles.bleCardOk : styles.bleCardOff]}
           onPress={conectarBLE}
-          activeOpacity={bleConectado ? 1 : 0.8}
-          disabled={bleConectado || bleConectando}
+          disabled={bleConectando || bleConectado}
+          activeOpacity={0.8}
         >
           {bleConectando ? (
             <>
@@ -358,7 +367,7 @@ export default function Home() {
           )}
         </TouchableOpacity>
 
-        {/* Botón principal — Sacar Kit */}
+        {/* Botón Sacar Kit */}
         <TouchableOpacity
           style={[styles.primaryButton, (!hayToallas || !bleConectado) && styles.primaryButtonDisabled]}
           onPress={handleSacarKit}
@@ -369,14 +378,10 @@ export default function Home() {
             <Ribbon color="white" size={42} strokeWidth={1.5} style={{ marginRight: 20 }} />
             <View style={styles.buttonTextContainer}>
               <Text style={styles.buttonTitle}>
-                {!hayToallas ? 'Sin kits' : !bleConectado ? 'Desconectado' : 'Saca tu Kit'}
+                {!bleConectado ? 'Desconectado' : !hayToallas ? 'Sin kits' : 'Saca tu Kit'}
               </Text>
               <Text style={styles.buttonSubtitle}>
-                {!hayToallas
-                  ? 'Contacta al personal'
-                  : !bleConectado
-                  ? 'Conecta el dispensador primero'
-                  : 'Toca para solicitar'}
+                {!bleConectado ? 'Conecta el dispensador primero' : !hayToallas ? 'Contacta al personal' : 'Toca para solicitar'}
               </Text>
             </View>
           </View>
@@ -402,7 +407,6 @@ export default function Home() {
           <LogOut color="#EC407A" size={20} style={{ marginRight: 8 }} />
           <Text style={styles.logoutText}>Cerrar sesión</Text>
         </TouchableOpacity>
-
       </View>
     </ScrollView>
   );
@@ -435,7 +439,7 @@ const styles = StyleSheet.create({
   statusTitle:     { fontSize: 16, fontWeight: 'bold', marginBottom: 2 },
   statusSub:       { fontSize: 13 },
 
-  bleCard:    { borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 16, borderWidth: 1.5, zIndex: 10 },
+  bleCard:    { borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16, borderWidth: 1.5, zIndex: 10 },
   bleCardOk:  { backgroundColor: '#E8F5E9', borderColor: '#66BB6A' },
   bleCardOff: { backgroundColor: '#FFF3E0', borderColor: '#FFA726' },
   bleTextOk:  { color: '#2E7D32', fontSize: 14, fontWeight: '500' },

@@ -1,3 +1,7 @@
+// Polyfill de Buffer — debe ir PRIMERO antes de todo
+import { Buffer } from 'buffer';
+global.Buffer = Buffer;
+
 import { Stack } from "expo-router";
 import { useEffect } from "react";
 import { inicializarDB } from '../lib/core/dataBase/database';
