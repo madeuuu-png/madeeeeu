@@ -250,8 +250,11 @@ export default function Home() {
     if (!numDocumento) { Alert.alert('Error', 'No se encontró tu número de documento'); return; }
     if (!bleConectado) { Alert.alert('Conexión', 'Conecta el dispensador primero.'); return; }
 
-    const puedeRetirar = await verificarCooldown();
-    if (!puedeRetirar) return;
+    // Los admins no tienen restricción de cooldown
+    if (!esAdmin) {
+      const puedeRetirar = await verificarCooldown();
+      if (!puedeRetirar) return;
+    }
 
     const respuesta = await enviarComandoBLE('DISPENSAR');
 

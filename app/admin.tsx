@@ -3,39 +3,38 @@ import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   ScrollView, StyleSheet, Text, TouchableOpacity, View,
-  ActivityIndicator, TextInput, Alert, Modal
+  ActivityIndicator, TextInput, Alert, Modal,
+  PermissionsAndroid, Platform
 } from 'react-native';
 import {
   ShieldCheck, ArrowLeft, Package, RefreshCw, Users,
   History, AlertTriangle, CheckCircle, Trash2, UserPlus,
   ChevronDown, ChevronUp, X, Bluetooth, BluetoothOff
 } from 'lucide-react-native';
-import { BleManager, Device } from 'react-native-ble-plx';
+import { BleManager, Device, Subscription } from 'react-native-ble-plx';
+import { Buffer } from 'buffer';
 import { supabase } from '../lib/core/supabase/supabase';
 
 const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
 const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
-const NOMBRE_ESP32        = 'MAKANA_DISPENSADOR';
+const ESP32_MAC           = '08:D1:F9:C8:D5:3E';
+
+// Global igual que en home — no se destruye entre renders
+const bleManager = new BleManager();
 
 export default function Admin() {
-  const router     = useRouter();
-  const bleManager = useRef(new BleManager()).current;
+  const router = useRouter();
 
-  // Inventario — solo lo que responde el ESP32
   const [motor1, setMotor1] = useState<number | null>(null);
   const [motor2, setMotor2] = useState<number | null>(null);
-
-  // Bluetooth
   const [bleConectado,  setBleConectado]  = useState(false);
   const [bleConectando, setBleConectando] = useState(false);
   const dispositivoRef = useRef<Device | null>(null);
 
-  // Historial
   const [historial,        setHistorial]        = useState<any[]>([]);
   const [mostrarHistorial, setMostrarHistorial]  = useState(false);
   const [cargandoHist,     setCargandoHist]      = useState(false);
 
-  // Estudiantes
   const [estudiantes,        setEstudiantes]        = useState<any[]>([]);
   const [mostrarEstudiantes, setMostrarEstudiantes] = useState(false);
   const [cargandoEst,        setCargandoEst]        = useState(false);
@@ -51,68 +50,119 @@ export default function Admin() {
     };
     verificar();
 
-    return () => { bleManager.destroy(); };
+    return () => { bleManager.stopDeviceScan(); };
   }, []);
 
-  // ── Conectar Bluetooth ──────────────────────────────────
-  const conectarBLE = () => {
+  // ── Conectar BLE ───────────────────────────────────────────
+  const conectarBLE = async () => {
     if (bleConectando || bleConectado) return;
+
+    // Si ya hay dispositivo guardado, verificar si sigue conectado
+    if (dispositivoRef.current) {
+      try {
+        const sigue = await dispositivoRef.current.isConnected();
+        if (sigue) {
+          setBleConectado(true);
+          pedirInventarioBLE(dispositivoRef.current);
+          return;
+        }
+      } catch { /* nada */ }
+      dispositivoRef.current = null;
+    }
+
+    pedirPermisosYEscanear();
+  };
+
+  const pedirPermisosYEscanear = async () => {
+    if (Platform.OS === 'android') {
+      const granted = await PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      ]);
+      const todosOk = Object.values(granted).every(
+        v => v === PermissionsAndroid.RESULTS.GRANTED
+      );
+      if (!todosOk) {
+        Alert.alert('Permisos', 'Activa Bluetooth y Ubicación en ajustes de la app.');
+        return;
+      }
+    }
+    iniciarEscaneo();
+  };
+
+  const iniciarEscaneo = async () => {
+    const estado = await bleManager.state();
+    if (estado !== 'PoweredOn') {
+      Alert.alert('Bluetooth apagado', 'Por favor activa el Bluetooth e intenta de nuevo.');
+      return;
+    }
+
     setBleConectando(true);
 
-    bleManager.startDeviceScan(null, null, async (error, device) => {
+    bleManager.startDeviceScan([SERVICE_UUID], null, async (error, device) => {
       if (error) {
         setBleConectando(false);
-        Alert.alert('Error', '¿Está el Bluetooth activado?');
+        Alert.alert('Error Bluetooth', 'Error al escanear: ' + error.message);
         return;
       }
 
-      if (device?.name === NOMBRE_ESP32) {
-        bleManager.stopDeviceScan();
-        try {
-          const conectado = await device.connect();
-          await conectado.discoverAllServicesAndCharacteristics();
-          dispositivoRef.current = conectado;
-          setBleConectado(true);
-          setBleConectando(false);
+      console.log('[BLE Admin] Dispositivo:', device?.name, '|', device?.localName, '| ID:', device?.id);
 
-          conectado.onDisconnected(() => {
-            setBleConectado(false);
-            dispositivoRef.current = null;
-            setMotor1(null);
-            setMotor2(null);
-          });
+      const esPorMAC    = device?.id === ESP32_MAC;
+      const nombre      = device?.name || device?.localName || '';
+      const esPorNombre = nombre.includes('MAKANA');
 
-          // Pide el estado actual del inventario al conectarse
-          pedirInventarioBLE(conectado);
+      if (!esPorMAC && !esPorNombre) return;
 
-        } catch {
-          setBleConectando(false);
-          Alert.alert('Error', 'No se pudo conectar al dispensador');
-        }
+      bleManager.stopDeviceScan();
+
+      try {
+        const conectado = await device!.connect();
+        await new Promise(r => setTimeout(r, 500));
+        await conectado.discoverAllServicesAndCharacteristics();
+        dispositivoRef.current = conectado;
+        setBleConectado(true);
+        setBleConectando(false);
+
+        conectado.onDisconnected(() => {
+          setBleConectado(false);
+          dispositivoRef.current = null;
+          setMotor1(null);
+          setMotor2(null);
+        });
+
+        // Pedir inventario al conectarse
+        pedirInventarioBLE(conectado);
+
+      } catch {
+        setBleConectando(false);
+        Alert.alert('Error', 'No se pudo conectar. Reinicia el ESP32 e intenta de nuevo.');
       }
     });
 
     setTimeout(() => {
       bleManager.stopDeviceScan();
-      if (!bleConectado) setBleConectando(false);
-    }, 10000);
+      setBleConectando(false);
+    }, 12000);
   };
 
-  // ── Pedir inventario actual al ESP32 ────────────────────
+  // ── Pedir inventario al ESP32 ──────────────────────────────
   const pedirInventarioBLE = async (device: Device) => {
     try {
-      const base64 = btoa('STATUS');
-      await device.writeCharacteristicWithResponseForService(
-        SERVICE_UUID, CHARACTERISTIC_UUID, base64
-      );
+      let suscripcion: Subscription | null = null;
 
-      const suscripcion = device.monitorCharacteristicForService(
+      const timeout = setTimeout(() => {
+        suscripcion?.remove();
+      }, 5000);
+
+      suscripcion = device.monitorCharacteristicForService(
         SERVICE_UUID, CHARACTERISTIC_UUID,
-        (err, characteristic) => {
-          suscripcion.remove();
-          if (err || !characteristic?.value) return;
-          const respuesta = atob(characteristic.value);
-          // Respuesta: "OK:7:8"
+        (err, char) => {
+          clearTimeout(timeout);
+          suscripcion?.remove();
+          if (err || !char?.value) return;
+          const respuesta = Buffer.from(char.value, 'base64').toString('utf-8');
           if (respuesta.startsWith('OK:')) {
             const partes = respuesta.split(':');
             setMotor1(parseInt(partes[1]));
@@ -120,41 +170,60 @@ export default function Admin() {
           }
         }
       );
-      setTimeout(() => suscripcion.remove(), 5000);
+
+      await new Promise(r => setTimeout(r, 100));
+      await device.writeCharacteristicWithResponseForService(
+        SERVICE_UUID, CHARACTERISTIC_UUID,
+        Buffer.from('STATUS').toString('base64')
+      );
+
     } catch { /* silencioso */ }
   };
 
-  // ── Enviar comando BLE ──────────────────────────────────
+  // ── Enviar comando BLE ─────────────────────────────────────
   const enviarComandoBLE = (comando: string): Promise<string | null> => {
     return new Promise(async (resolve) => {
       const device = dispositivoRef.current;
-      if (!device) { resolve(null); return; }
+      if (!device) return resolve(null);
+
+      let suscripcion: Subscription | null = null;
+
+      const timeout = setTimeout(() => {
+        suscripcion?.remove();
+        resolve(null);
+      }, 6000);
 
       try {
-        await device.writeCharacteristicWithResponseForService(
-          SERVICE_UUID, CHARACTERISTIC_UUID, btoa(comando)
-        );
-
-        const suscripcion = device.monitorCharacteristicForService(
+        suscripcion = device.monitorCharacteristicForService(
           SERVICE_UUID, CHARACTERISTIC_UUID,
-          (err, characteristic) => {
-            suscripcion.remove();
-            if (err || !characteristic?.value) { resolve(null); return; }
-            resolve(atob(characteristic.value));
+          (err, char) => {
+            clearTimeout(timeout);
+            suscripcion?.remove();
+            if (err || !char?.value) return resolve(null);
+            resolve(Buffer.from(char.value, 'base64').toString('utf-8'));
           }
         );
-        setTimeout(() => { suscripcion.remove(); resolve(null); }, 5000);
-      } catch { resolve(null); }
+
+        await new Promise(r => setTimeout(r, 100));
+        await device.writeCharacteristicWithResponseForService(
+          SERVICE_UUID, CHARACTERISTIC_UUID,
+          Buffer.from(comando).toString('base64')
+        );
+
+      } catch {
+        clearTimeout(timeout);
+        suscripcion?.remove();
+        resolve(null);
+      }
     });
   };
 
-  // ── Recargar inventario (solo BLE, sin Supabase) ────────
+  // ── Recargar inventario ────────────────────────────────────
   const marcarInventarioRecargado = async () => {
     if (!bleConectado) {
       Alert.alert('Sin conexión', 'Conecta el dispensador por Bluetooth primero');
       return;
     }
-
     Alert.alert(
       'Confirmar recarga',
       '¿Confirmas que el dispensador fue recargado físicamente?',
@@ -178,7 +247,7 @@ export default function Admin() {
     );
   };
 
-  // ── Historial ───────────────────────────────────────────
+  // ── Historial ──────────────────────────────────────────────
   const cargarHistorial = async () => {
     if (mostrarHistorial) { setMostrarHistorial(false); return; }
     setCargandoHist(true);
@@ -194,7 +263,7 @@ export default function Admin() {
     finally { setCargandoHist(false); setMostrarHistorial(true); }
   };
 
-  // ── Estudiantes ─────────────────────────────────────────
+  // ── Estudiantes ────────────────────────────────────────────
   const cargarEstudiantes = async () => {
     if (mostrarEstudiantes) { setMostrarEstudiantes(false); return; }
     setCargandoEst(true);
@@ -257,7 +326,6 @@ export default function Admin() {
         <View style={styles.circle1} />
         <View style={styles.circle2} />
 
-        {/* Header */}
         <View style={styles.header}>
           <TouchableOpacity style={styles.backBtn} onPress={() => router.back()} activeOpacity={0.7}>
             <ArrowLeft color="#EC407A" size={24} strokeWidth={2.5} />
@@ -268,14 +336,13 @@ export default function Admin() {
           <ShieldCheck color="#C2185B" size={28} />
         </View>
 
-        {/* ── INVENTARIO + BLE ── */}
+        {/* ── INVENTARIO ── */}
         <View style={styles.sectionCard}>
           <View style={styles.sectionHeader}>
             <Package color="#C2185B" size={24} style={{ marginRight: 10 }} />
             <Text style={styles.sectionTitle}>Inventario del dispensador</Text>
           </View>
 
-          {/* Tarjeta BLE */}
           <TouchableOpacity
             style={[styles.bleCard, bleConectado ? styles.bleCardOk : styles.bleCardOff]}
             onPress={conectarBLE}
@@ -300,14 +367,13 @@ export default function Admin() {
             )}
           </TouchableOpacity>
 
-          {/* Inventario — solo si está conectado */}
           {bleConectado && motor1 !== null && motor2 !== null ? (
             <>
               {sinToallas ? (
                 <View style={styles.alertCardRed}>
                   <AlertTriangle color="#C62828" size={22} style={{ marginRight: 10 }} />
                   <View>
-                    <Text style={styles.alertTitleRed}>⚠️ Dispensador vacío</Text>
+                    <Text style={styles.alertTitleRed}>Dispensador vacío</Text>
                     <Text style={styles.alertSubRed}>Ambos motores en 0. Recarga urgente.</Text>
                   </View>
                 </View>
@@ -315,7 +381,7 @@ export default function Admin() {
                 <View style={styles.alertCardOrange}>
                   <AlertTriangle color="#E65100" size={22} style={{ marginRight: 10 }} />
                   <View>
-                    <Text style={styles.alertTitleOrange}>⚠️ Inventario bajo</Text>
+                    <Text style={styles.alertTitleOrange}>Inventario bajo</Text>
                     <Text style={styles.alertSubOrange}>Quedan solo {totalToallas} toallas en total.</Text>
                   </View>
                 </View>
@@ -431,14 +497,13 @@ export default function Admin() {
           )}
         </View>
 
-        {/* Volver */}
         <TouchableOpacity style={styles.backBottomBtn} onPress={() => router.push('/home')} activeOpacity={0.8}>
           <ArrowLeft color="white" size={18} style={{ marginRight: 8 }} />
           <Text style={styles.backBottomText}>Volver al inicio</Text>
         </TouchableOpacity>
       </View>
 
-      {/* ── MODAL AGREGAR ESTUDIANTE ── */}
+      {/* ── MODAL ── */}
       <Modal visible={modalAgregar} transparent animationType="slide" onRequestClose={() => setModalAgregar(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -505,7 +570,7 @@ const styles = StyleSheet.create({
   sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
   sectionTitle:  { fontSize: 18, fontWeight: 'bold', color: '#C2185B' },
 
-  bleCard:    { borderRadius: 12, padding: 12, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5 },
+  bleCard:    { borderRadius: 12, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, borderWidth: 1.5 },
   bleCardOk:  { backgroundColor: '#E8F5E9', borderColor: '#66BB6A' },
   bleCardOff: { backgroundColor: '#FFF3E0', borderColor: '#FFA726' },
   bleTextOk:  { color: '#2E7D32', fontSize: 14, fontWeight: '500' },
