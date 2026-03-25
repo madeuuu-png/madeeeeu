@@ -381,3 +381,11 @@ export function recargarInventario(motor1 = 8, motor2 = 8): void {
   );
   console.log(`✅ Inventario recargado: M1=${motor1} M2=${motor2}`);
 }
+// INVENTARIO — agregar cédula individual (para nuevas estudiantes desde admin)
+export function agregarCedulaLocal(numDocumento: string): void {
+  db.runSync(
+    `INSERT OR IGNORE INTO cedulas (numDocumento) VALUES (?)`,
+    [numDocumento]
+  );
+  console.log(`✅ Cédula agregada local: ${numDocumento}`);
+}

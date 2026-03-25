@@ -1,38 +1,33 @@
+// ============================================================
+//  ADMIN — Panel administración Makana
+//  Fix: al agregar estudiante también se inserta en cedulas SQLite
+//  Fix: reset de cooldown individual desde el panel
+// ============================================================
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useRouter, useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ScrollView, StyleSheet, Text, TouchableOpacity, View,
-  ActivityIndicator, TextInput, Alert, Modal,
-  PermissionsAndroid, Platform
+  ActivityIndicator, TextInput, Alert, Modal
 } from 'react-native';
 import {
   ShieldCheck, ArrowLeft, Package, RefreshCw, Users,
   History, AlertTriangle, CheckCircle, Trash2, UserPlus,
-  ChevronDown, ChevronUp, X, Bluetooth, BluetoothOff
+  ChevronDown, ChevronUp, X, RotateCcw
 } from 'lucide-react-native';
-import { BleManager, Device, Subscription } from 'react-native-ble-plx';
-import { Buffer } from 'buffer';
 import { supabase } from '../lib/core/supabase/supabase';
 import {
   obtenerInventario,
   recargarInventario,
+  agregarCedulaLocal,       // <-- asegúrate de exportar esto desde database.ts (ver abajo)
   type Inventario,
 } from '../lib/core/dataBase/database';
-
-const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
-const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
-const ESP32_MAC           = '08:D1:F9:C8:D5:3E';
-
-const bleManager = new BleManager();
 
 export default function Admin() {
   const router = useRouter();
 
   const [inventario,    setInventario]    = useState<Inventario | null>(null);
-  const [bleConectado,  setBleConectado]  = useState(false);
-  const [bleConectando, setBleConectando] = useState(false);
-  const dispositivoRef = useRef<Device | null>(null);
 
   const [historial,        setHistorial]        = useState<any[]>([]);
   const [mostrarHistorial, setMostrarHistorial]  = useState(false);
@@ -52,142 +47,18 @@ export default function Admin() {
       if (flag !== 'true') { router.replace('/home'); return; }
     };
     verificar();
-
-    // Cargar inventario desde SQLite al abrir
-    const inv = obtenerInventario();
-    setInventario(inv);
-
-    return () => { bleManager.stopDeviceScan(); };
   }, []);
 
-  // ── Conectar BLE ───────────────────────────────────────────
-  const conectarBLE = async () => {
-    if (bleConectando || bleConectado) return;
+  // Actualiza inventario cada vez que entras a la pantalla
+  useFocusEffect(
+    useCallback(() => {
+      const inv = obtenerInventario();
+      setInventario(inv);
+    }, [])
+  );
 
-    if (dispositivoRef.current) {
-      try {
-        const sigue = await dispositivoRef.current.isConnected();
-        if (sigue) { setBleConectado(true); return; }
-      } catch { /* nada */ }
-      dispositivoRef.current = null;
-    }
-
-    pedirPermisosYEscanear();
-  };
-
-  const pedirPermisosYEscanear = async () => {
-    if (Platform.OS === 'android') {
-      const granted = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-      ]);
-      const todosOk = Object.values(granted).every(
-        v => v === PermissionsAndroid.RESULTS.GRANTED
-      );
-      if (!todosOk) {
-        Alert.alert('Permisos', 'Activa Bluetooth y Ubicación en ajustes de la app.');
-        return;
-      }
-    }
-    iniciarEscaneo();
-  };
-
-  const iniciarEscaneo = async () => {
-    const estado = await bleManager.state();
-    if (estado !== 'PoweredOn') {
-      Alert.alert('Bluetooth apagado', 'Por favor activa el Bluetooth e intenta de nuevo.');
-      return;
-    }
-
-    setBleConectando(true);
-
-    bleManager.startDeviceScan([SERVICE_UUID], null, async (error, device) => {
-      if (error) {
-        setBleConectando(false);
-        Alert.alert('Error Bluetooth', 'Error al escanear: ' + error.message);
-        return;
-      }
-
-      console.log('[BLE Admin] Dispositivo:', device?.name, '|', device?.localName, '| ID:', device?.id);
-
-      const esPorMAC    = device?.id === ESP32_MAC;
-      const nombreDev   = device?.name || device?.localName || '';
-      const esPorNombre = nombreDev.includes('MAKANA');
-
-      if (!esPorMAC && !esPorNombre) return;
-
-      bleManager.stopDeviceScan();
-
-      try {
-        const conectado = await device!.connect();
-        await new Promise(r => setTimeout(r, 500));
-        await conectado.discoverAllServicesAndCharacteristics();
-        dispositivoRef.current = conectado;
-        setBleConectado(true);
-        setBleConectando(false);
-
-        conectado.onDisconnected(() => {
-          setBleConectado(false);
-          dispositivoRef.current = null;
-        });
-
-      } catch {
-        setBleConectando(false);
-        Alert.alert('Error', 'No se pudo conectar. Reinicia el ESP32 e intenta de nuevo.');
-      }
-    });
-
-    setTimeout(() => {
-      bleManager.stopDeviceScan();
-      setBleConectando(false);
-    }, 12000);
-  };
-
-  // ── Enviar comando BLE ─────────────────────────────────────
-  const enviarComandoBLE = (comando: string): Promise<string | null> => {
-    return new Promise(async (resolve) => {
-      const device = dispositivoRef.current;
-      if (!device) return resolve(null);
-
-      let suscripcion: Subscription | null = null;
-
-      const timeout = setTimeout(() => {
-        suscripcion?.remove();
-        resolve(null);
-      }, 6000);
-
-      try {
-        suscripcion = device.monitorCharacteristicForService(
-          SERVICE_UUID, CHARACTERISTIC_UUID,
-          (err, char) => {
-            clearTimeout(timeout);
-            suscripcion?.remove();
-            if (err || !char?.value) return resolve(null);
-            resolve(Buffer.from(char.value, 'base64').toString('utf-8'));
-          }
-        );
-
-        await new Promise(r => setTimeout(r, 100));
-        await device.writeCharacteristicWithResponseForService(
-          SERVICE_UUID, CHARACTERISTIC_UUID,
-          Buffer.from(comando).toString('base64')
-        );
-
-      } catch {
-        clearTimeout(timeout);
-        suscripcion?.remove();
-        resolve(null);
-      }
-    });
-  };
-
-  // ── Recargar inventario ────────────────────────────────────
+  // ── Recargar inventario ─────────────────────────────────────
   const marcarInventarioRecargado = async () => {
-    if (!bleConectado) {
-      Alert.alert('Sin conexión', 'Conecta el dispensador por Bluetooth primero');
-      return;
-    }
     Alert.alert(
       'Confirmar recarga',
       '¿Confirmas que el dispensador fue recargado físicamente con 8+8 toallas?',
@@ -195,15 +66,10 @@ export default function Admin() {
         { text: 'Cancelar', style: 'cancel' },
         {
           text: 'Sí, recargar',
-          onPress: async () => {
-            // Avisar al ESP32 para que resetee su turno de motores
-            await enviarComandoBLE('RECARGAR');
-
-            // SQLite es la fuente de verdad
+          onPress: () => {
             recargarInventario(8, 8);
             const inv = obtenerInventario();
             setInventario(inv);
-
             Alert.alert('✅ Listo', 'Inventario recargado a 8+8 toallas');
           }
         }
@@ -211,7 +77,7 @@ export default function Admin() {
     );
   };
 
-  // ── Historial ──────────────────────────────────────────────
+  // ── Historial ───────────────────────────────────────────────
   const cargarHistorial = async () => {
     if (mostrarHistorial) { setMostrarHistorial(false); return; }
     setCargandoHist(true);
@@ -223,11 +89,11 @@ export default function Admin() {
         .order('UltimaEntrega', { ascending: false })
         .limit(50);
       if (!error && data) setHistorial(data);
-    } catch { }
+    } catch {}
     finally { setCargandoHist(false); setMostrarHistorial(true); }
   };
 
-  // ── Estudiantes ────────────────────────────────────────────
+  // ── Estudiantes ─────────────────────────────────────────────
   const cargarEstudiantes = async () => {
     if (mostrarEstudiantes) { setMostrarEstudiantes(false); return; }
     setCargandoEst(true);
@@ -237,7 +103,7 @@ export default function Admin() {
         .select('NumDocumento, NombreCompleto, UltimaEntrega')
         .order('NombreCompleto', { ascending: true });
       if (!error && data) setEstudiantes(data);
-    } catch { }
+    } catch {}
     finally { setCargandoEst(false); setMostrarEstudiantes(true); }
   };
 
@@ -250,7 +116,10 @@ export default function Admin() {
         {
           text: 'Eliminar', style: 'destructive',
           onPress: async () => {
-            const { error } = await supabase.from('estudiantes').delete().eq('NumDocumento', doc);
+            const { error } = await supabase
+              .from('estudiantes')
+              .delete()
+              .eq('NumDocumento', doc);
             if (error) { Alert.alert('Error', 'No se pudo eliminar'); return; }
             setEstudiantes(prev => prev.filter(e => e.NumDocumento !== doc));
           }
@@ -259,26 +128,91 @@ export default function Admin() {
     );
   };
 
+  // ── Agregar estudiante ──────────────────────────────────────
+  // FIX: también inserta la cédula en SQLite para que pueda
+  //      hacer login sin internet en este dispositivo.
   const agregarEstudiante = async () => {
-    if (nuevoDoc.length !== 10) { Alert.alert('Error', 'La cédula debe tener 10 dígitos'); return; }
-    if (!nuevoNombre.trim())    { Alert.alert('Error', 'El nombre no puede estar vacío'); return; }
+    const docLimpio    = nuevoDoc.trim();
+    const nombreLimpio = nuevoNombre.trim();
+
+    if (docLimpio.length !== 10) {
+      Alert.alert('Error', 'La cédula debe tener 10 dígitos');
+      return;
+    }
+    if (!nombreLimpio) {
+      Alert.alert('Error', 'El nombre no puede estar vacío');
+      return;
+    }
+
     setGuardando(true);
     try {
+      // 1. Insertar en Supabase
       const { error } = await supabase
         .from('estudiantes')
-        .insert({ NumDocumento: nuevoDoc.trim(), NombreCompleto: nuevoNombre.trim() });
+        .insert({ NumDocumento: docLimpio, NombreCompleto: nombreLimpio });
+
       if (error) {
         Alert.alert('Error', error.code === '23505' ? 'Esa cédula ya existe' : error.message);
         return;
       }
-      Alert.alert('✅ Listo', `${nuevoNombre} agregada correctamente`);
+
+      // 2. FIX: insertar también en SQLite local para login offline
+      agregarCedulaLocal(docLimpio);
+
+      Alert.alert('✅ Listo', `${nombreLimpio} agregada correctamente`);
       setModalAgregar(false);
-      setNuevoDoc(''); setNuevoNombre('');
-      if (mostrarEstudiantes) cargarEstudiantes();
+      setNuevoDoc('');
+      setNuevoNombre('');
+
+      // Refrescar lista si está visible
+      if (mostrarEstudiantes) {
+        setCargandoEst(true);
+        const { data } = await supabase
+          .from('estudiantes')
+          .select('NumDocumento, NombreCompleto, UltimaEntrega')
+          .order('NombreCompleto', { ascending: true });
+        if (data) setEstudiantes(data);
+        setCargandoEst(false);
+      }
     } catch {
       Alert.alert('Error', 'Algo salió mal');
+    } finally {
+      setGuardando(false);
     }
-    finally { setGuardando(false); }
+  };
+
+  // ── Reset cooldown individual ───────────────────────────────
+  // Útil si una estudiante perdió su kit y necesita retirarlo de nuevo
+  const resetearCooldown = (doc: string, nombre: string) => {
+    Alert.alert(
+      'Resetear cooldown',
+      `¿Permitir que ${nombre} retire un kit ahora aunque no hayan pasado 28 días?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Sí, resetear',
+          onPress: async () => {
+            const { error } = await supabase
+              .from('estudiantes')
+              .update({ UltimaEntrega: null })
+              .eq('NumDocumento', doc);
+
+            if (error) {
+              Alert.alert('Error', 'No se pudo resetear el cooldown');
+              return;
+            }
+
+            // Actualizar lista local
+            setEstudiantes(prev =>
+              prev.map(e =>
+                e.NumDocumento === doc ? { ...e, UltimaEntrega: null } : e
+              )
+            );
+            Alert.alert('✅ Listo', `Cooldown de ${nombre} reseteado`);
+          }
+        }
+      ]
+    );
   };
 
   const motor1       = inventario?.motor1 ?? 0;
@@ -309,7 +243,6 @@ export default function Admin() {
             <Text style={styles.sectionTitle}>Inventario del dispensador</Text>
           </View>
 
-          {/* Alerta de estado — siempre visible, sin necesitar BLE */}
           {sinToallas ? (
             <View style={styles.alertCardRed}>
               <AlertTriangle color="#C62828" size={22} style={{ marginRight: 10 }} />
@@ -333,7 +266,6 @@ export default function Admin() {
             </View>
           )}
 
-          {/* Conteo por motor */}
           <View style={styles.motorRow}>
             <View style={styles.motorBox}>
               <Text style={styles.motorLabel}>Motor 1</Text>
@@ -348,33 +280,8 @@ export default function Admin() {
             </View>
           </View>
 
-          {/* BLE — solo para enviar RECARGAR al ESP32 */}
           <TouchableOpacity
-            style={[styles.bleCard, bleConectado ? styles.bleCardOk : styles.bleCardOff]}
-            onPress={conectarBLE}
-            activeOpacity={bleConectado ? 1 : 0.8}
-            disabled={bleConectado || bleConectando}
-          >
-            {bleConectando ? (
-              <>
-                <ActivityIndicator size="small" color="#E65100" style={{ marginRight: 10 }} />
-                <Text style={styles.bleTextOff}>Buscando dispensador...</Text>
-              </>
-            ) : bleConectado ? (
-              <>
-                <Bluetooth color="#2E7D32" size={20} style={{ marginRight: 10 }} />
-                <Text style={styles.bleTextOk}>Dispensador conectado ✓</Text>
-              </>
-            ) : (
-              <>
-                <BluetoothOff color="#E65100" size={20} style={{ marginRight: 10 }} />
-                <Text style={styles.bleTextOff}>Conectar para enviar recarga al dispensador</Text>
-              </>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.reloadBtn, !bleConectado && styles.reloadBtnDisabled]}
+            style={styles.reloadBtn}
             onPress={marcarInventarioRecargado}
             activeOpacity={0.8}
           >
@@ -447,7 +354,25 @@ export default function Admin() {
                     <View style={{ flex: 1 }}>
                       <Text style={styles.estudianteNombre}>{est.NombreCompleto}</Text>
                       <Text style={styles.estudianteDoc}>CI: {est.NumDocumento}</Text>
+                      {est.UltimaEntrega && (
+                        <Text style={styles.estudianteEntrega}>
+                          Último kit: {new Date(est.UltimaEntrega).toLocaleDateString('es-EC', {
+                            day: '2-digit', month: 'short', year: 'numeric'
+                          })}
+                        </Text>
+                      )}
                     </View>
+                    {/* Botón reset cooldown */}
+                    {est.UltimaEntrega && (
+                      <TouchableOpacity
+                        style={styles.resetBtn}
+                        onPress={() => resetearCooldown(est.NumDocumento, est.NombreCompleto)}
+                        activeOpacity={0.7}
+                      >
+                        <RotateCcw color="#E65100" size={16} />
+                      </TouchableOpacity>
+                    )}
+                    {/* Botón eliminar */}
                     <TouchableOpacity
                       style={styles.deleteBtn}
                       onPress={() => eliminarEstudiante(est.NumDocumento, est.NombreCompleto)}
@@ -468,7 +393,7 @@ export default function Admin() {
         </TouchableOpacity>
       </View>
 
-      {/* ── MODAL ── */}
+      {/* ── MODAL AGREGAR ── */}
       <Modal visible={modalAgregar} transparent animationType="slide" onRequestClose={() => setModalAgregar(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
@@ -532,11 +457,6 @@ const styles = StyleSheet.create({
   sectionCard:   { backgroundColor: 'white', borderRadius: 20, padding: 20, marginBottom: 16, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 4, zIndex: 10 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
   sectionTitle:  { fontSize: 18, fontWeight: 'bold', color: '#C2185B' },
-  bleCard:    { borderRadius: 12, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, borderWidth: 1.5 },
-  bleCardOk:  { backgroundColor: '#E8F5E9', borderColor: '#66BB6A' },
-  bleCardOff: { backgroundColor: '#FFF3E0', borderColor: '#FFA726' },
-  bleTextOk:  { color: '#2E7D32', fontSize: 14, fontWeight: '500' },
-  bleTextOff: { color: '#E65100', fontSize: 14, fontWeight: '500' },
   alertCardRed:    { backgroundColor: '#FFEBEE', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#EF5350' },
   alertTitleRed:   { fontSize: 15, fontWeight: 'bold', color: '#C62828' },
   alertSubRed:     { fontSize: 13, color: '#D32F2F', marginTop: 2 },
@@ -552,8 +472,7 @@ const styles = StyleSheet.create({
   motorNumEmpty: { color: '#BDBDBD' },
   motorSub:      { fontSize: 12, color: '#F48FB1' },
   motorDivider:  { width: 2, height: 60, backgroundColor: '#F8BBD0' },
-  reloadBtn:         { backgroundColor: '#C2185B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', shadowColor: '#C2185B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
-  reloadBtnDisabled: { backgroundColor: '#BDBDBD', shadowOpacity: 0.1, elevation: 0 },
+  reloadBtn:     { backgroundColor: '#C2185B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', shadowColor: '#C2185B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
   reloadBtnText: { color: 'white', fontWeight: 'bold', fontSize: 15 },
   historialItem:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FCE4EC' },
   historialNombre: { fontSize: 14, fontWeight: '600', color: '#C2185B' },
@@ -562,10 +481,12 @@ const styles = StyleSheet.create({
   emptyText:       { color: '#F48FB1', fontSize: 14, textAlign: 'center', paddingVertical: 12 },
   addBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FCE4EC', borderRadius: 12, paddingVertical: 12, marginTop: 4, borderWidth: 1.5, borderColor: '#F8BBD0' },
   addBtnText: { color: '#C2185B', fontWeight: 'bold', fontSize: 14 },
-  estudianteItem:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FCE4EC' },
-  estudianteNombre: { fontSize: 14, fontWeight: '600', color: '#C2185B' },
-  estudianteDoc:    { fontSize: 12, color: '#F48FB1', marginTop: 2 },
-  deleteBtn:        { width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFEBEE', justifyContent: 'center', alignItems: 'center' },
+  estudianteItem:    { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FCE4EC', gap: 8 },
+  estudianteNombre:  { fontSize: 14, fontWeight: '600', color: '#C2185B' },
+  estudianteDoc:     { fontSize: 12, color: '#F48FB1', marginTop: 2 },
+  estudianteEntrega: { fontSize: 11, color: '#E65100', marginTop: 2 },
+  resetBtn:  { width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFF3E0', justifyContent: 'center', alignItems: 'center' },
+  deleteBtn: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFEBEE', justifyContent: 'center', alignItems: 'center' },
   backBottomBtn:  { backgroundColor: '#EC407A', borderRadius: 16, padding: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 8, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4, zIndex: 10 },
   backBottomText: { color: 'white', fontSize: 16, fontWeight: 'bold' },
   modalOverlay:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },

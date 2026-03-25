@@ -26,6 +26,14 @@ const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
 const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
 const ESP32_MAC = 'A4:F0:0F:5C:FD:12';
 
+// Timeout para esperar respuesta del ESP32.
+// Debe ser mayor que el tiempo más largo de motor (3000ms) + margen.
+const BLE_RESPONSE_TIMEOUT_MS = 7000;
+
+// Tiempo antes de escribir para que la suscripción esté lista.
+// 250ms es más seguro que 100ms en dispositivos lentos.
+const BLE_SUBSCRIBE_DELAY_MS = 250;
+
 const bleManager = new BleManager();
 
 export default function Home() {
@@ -169,32 +177,41 @@ export default function Home() {
   };
 
   // ── Enviar comando BLE ─────────────────────────────────────
+  // FIX: timeout subido a 7000ms y delay de suscripción a 250ms
   const enviarComandoBLE = (comando: string): Promise<string | null> => {
     return new Promise(async (resolve) => {
       const device = dispositivoRef.current;
       if (!device) return resolve(null);
 
       let suscripcion: Subscription | null = null;
+      let resuelto = false;
 
       const timeout = setTimeout(() => {
-        suscripcion?.remove();
-        resolve(null);
-      }, 6000);
+        if (!resuelto) {
+          resuelto = true;
+          suscripcion?.remove();
+          resolve(null);
+        }
+      }, BLE_RESPONSE_TIMEOUT_MS);
 
       try {
         suscripcion = device.monitorCharacteristicForService(
           SERVICE_UUID,
           CHARACTERISTIC_UUID,
           (err, char) => {
+            if (resuelto) return;
+            resuelto = true;
             clearTimeout(timeout);
             suscripcion?.remove();
             if (err || !char?.value) return resolve(null);
             const respuesta = Buffer.from(char.value, 'base64').toString('utf-8');
+            console.log('[BLE] Respuesta recibida:', respuesta);
             resolve(respuesta);
           }
         );
 
-        await new Promise(r => setTimeout(r, 100));
+        // FIX: 250ms para que la suscripción esté registrada antes de escribir
+        await new Promise(r => setTimeout(r, BLE_SUBSCRIBE_DELAY_MS));
 
         await device.writeCharacteristicWithResponseForService(
           SERVICE_UUID,
@@ -203,9 +220,12 @@ export default function Home() {
         );
 
       } catch {
-        clearTimeout(timeout);
-        suscripcion?.remove();
-        resolve(null);
+        if (!resuelto) {
+          resuelto = true;
+          clearTimeout(timeout);
+          suscripcion?.remove();
+          resolve(null);
+        }
       }
     });
   };
@@ -253,9 +273,13 @@ export default function Home() {
       if (!puedeRetirar) return;
     }
 
-    // La app decide qué motor usar según el inventario SQLite
-    // Motor 1 primero; cuando se agota, pasa a motor 2
     const inv = obtenerInventario();
+
+    if (inv.motor1 === 0 && inv.motor2 === 0) {
+      Alert.alert('Sin stock', 'No hay toallas disponibles');
+      return;
+    }
+
     const comando = inv.motor1 > 0 ? 'DISPENSAR_M1' : 'DISPENSAR_M2';
     const respuesta = await enviarComandoBLE(comando);
 
@@ -269,8 +293,7 @@ export default function Home() {
       return;
     }
 
-    if (respuesta === 'OK') {
-      // SQLite lleva la cuenta — descontar aquí
+    if (respuesta === 'OK_M1' || respuesta === 'OK_M2') {
       const nuevoInv = descontarToalla();
       setInventario(nuevoInv);
 
@@ -279,6 +302,8 @@ export default function Home() {
       sincronizarConSupabase();
 
       Alert.alert('✅ ¡Listo!', 'Tu kit fue dispensado. ¡Cuídate mucho!');
+    } else {
+      Alert.alert('Error', 'El dispensador no respondió correctamente');
     }
   };
 
