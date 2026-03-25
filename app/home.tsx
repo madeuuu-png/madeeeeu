@@ -17,13 +17,15 @@ import {
   guardarEntregaLocal,
   obtenerUltimaEntregaLocal,
   sincronizarConSupabase,
+  obtenerInventario,
+  descontarToalla,
+  type Inventario,
 } from '../lib/core/dataBase/database';
 
 const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
 const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
-const ESP32_MAC           = '08:D1:F9:C8:D5:3E'; // MAC del ESP32 — más confiable que el nombre
+const ESP32_MAC = 'A4:F0:0F:5C:FD:12';
 
-// Global para que no muera entre renders
 const bleManager = new BleManager();
 
 export default function Home() {
@@ -31,7 +33,7 @@ export default function Home() {
 
   const [numDocumento, setNumDocumento] = useState('');
   const [nombre,       setNombre]       = useState('');
-  const [hayToallas,   setHayToallas]   = useState(true);
+  const [inventario,   setInventario]   = useState<Inventario>({ motor1: 8, motor2: 8 });
   const [cargando,     setCargando]     = useState(true);
   const [esAdmin,      setEsAdmin]      = useState(false);
   const [bleConectado,  setBleConectado]  = useState(false);
@@ -59,10 +61,19 @@ export default function Home() {
         }
       }
 
-      // Inventario ya no está en Supabase — lo trae el ESP32 por BLE
-      setCargando(false);
+      // Inventario desde SQLite
+      const inv = obtenerInventario();
+      setInventario(inv);
 
-      // Subir entregas pendientes
+      if (inv.motor1 === 0 && inv.motor2 === 0) {
+        Alert.alert(
+          '⚠️ Sin kits disponibles',
+          'El dispensador está vacío. Por favor avisa al personal del colegio.',
+          [{ text: 'Entendido' }]
+        );
+      }
+
+      setCargando(false);
       sincronizarConSupabase();
     };
 
@@ -70,11 +81,12 @@ export default function Home() {
     return () => { bleManager.stopDeviceScan(); };
   }, []);
 
+  const hayToallas = inventario.motor1 + inventario.motor2 > 0;
+
   // ── Conectar BLE ───────────────────────────────────────────
   const conectarBLE = async () => {
     if (bleConectando || bleConectado) return;
 
-    // Si ya hay dispositivo guardado, verificar si sigue conectado
     if (dispositivoRef.current) {
       try {
         const sigue = await dispositivoRef.current.isConnected();
@@ -105,22 +117,15 @@ export default function Home() {
   };
 
   const iniciarEscaneo = async () => {
-    // Verificar que el Bluetooth esté encendido antes de escanear
     const estado = await bleManager.state();
-    console.log('[BLE] Estado:', estado);
-
     if (estado !== 'PoweredOn') {
       setBleConectando(false);
-      Alert.alert(
-        'Bluetooth apagado',
-        'Por favor activa el Bluetooth e intenta de nuevo.'
-      );
+      Alert.alert('Bluetooth apagado', 'Por favor activa el Bluetooth e intenta de nuevo.');
       return;
     }
 
     setBleConectando(true);
 
-    // Filtrar por SERVICE_UUID para encontrar solo el ESP32
     bleManager.startDeviceScan([SERVICE_UUID], null, async (error, device) => {
       if (error) {
         setBleConectando(false);
@@ -128,13 +133,11 @@ export default function Home() {
         return;
       }
 
-      // Log para debug — útil para ver qué llega
       console.log('[BLE] Dispositivo:', device?.name, '|', device?.localName, '| ID:', device?.id);
 
-      // Conectar por MAC (más confiable) O por nombre como backup
       const esPorMAC    = device?.id === ESP32_MAC;
-      const nombre      = device?.name || device?.localName || '';
-      const esPorNombre = nombre.includes('MAKANA');
+      const nombreDev   = device?.name || device?.localName || '';
+      const esPorNombre = nombreDev.includes('MAKANA');
 
       if (!esPorMAC && !esPorNombre) return;
 
@@ -142,7 +145,7 @@ export default function Home() {
 
       try {
         const conectado = await device!.connect();
-        await new Promise(r => setTimeout(r, 500)); // delay para que ESP32 esté listo
+        await new Promise(r => setTimeout(r, 500));
         await conectado.discoverAllServicesAndCharacteristics();
         dispositivoRef.current = conectado;
         setBleConectado(true);
@@ -153,13 +156,12 @@ export default function Home() {
           dispositivoRef.current = null;
         });
 
-      } catch (e) {
+      } catch {
         setBleConectando(false);
         Alert.alert('Error', 'No se pudo conectar al dispensador. Reinicia el ESP32 e intenta de nuevo.');
       }
     });
 
-    // Timeout de 12 segundos
     setTimeout(() => {
       bleManager.stopDeviceScan();
       setBleConectando(false);
@@ -180,7 +182,6 @@ export default function Home() {
       }, 6000);
 
       try {
-        // Primero suscribirse, luego escribir
         suscripcion = device.monitorCharacteristicForService(
           SERVICE_UUID,
           CHARACTERISTIC_UUID,
@@ -193,7 +194,6 @@ export default function Home() {
           }
         );
 
-        // Pequeño delay para que el monitor esté listo
         await new Promise(r => setTimeout(r, 100));
 
         await device.writeCharacteristicWithResponseForService(
@@ -214,8 +214,7 @@ export default function Home() {
   const verificarCooldown = async (): Promise<boolean> => {
     const hoy = new Date();
 
-    // 1. SQLite local (funciona offline)
-    const fechaLocal = obtenerUltimaEntregaLocal(numDocumento); // síncrona, sin await
+    const fechaLocal = obtenerUltimaEntregaLocal(numDocumento);
     if (fechaLocal) {
       const dias = (hoy.getTime() - new Date(fechaLocal).getTime()) / (1000 * 60 * 60 * 24);
       if (dias < 28) {
@@ -224,7 +223,6 @@ export default function Home() {
       }
     }
 
-    // 2. Supabase (si hay internet)
     const net = await NetInfo.fetch();
     if (net.isConnected) {
       const { data } = await supabase
@@ -248,25 +246,33 @@ export default function Home() {
   // ── Sacar Kit ──────────────────────────────────────────────
   const handleSacarKit = async () => {
     if (!numDocumento) { Alert.alert('Error', 'No se encontró tu número de documento'); return; }
-    if (!bleConectado) { Alert.alert('Conexión', 'Conecta el dispensador primero.'); return; }
+    if (!bleConectado)  { Alert.alert('Conexión', 'Conecta el dispensador primero.'); return; }
 
-    // Los admins no tienen restricción de cooldown
     if (!esAdmin) {
       const puedeRetirar = await verificarCooldown();
       if (!puedeRetirar) return;
     }
 
-    const respuesta = await enviarComandoBLE('DISPENSAR');
+    // La app decide qué motor usar según el inventario SQLite
+    // Motor 1 primero; cuando se agota, pasa a motor 2
+    const inv = obtenerInventario();
+    const comando = inv.motor1 > 0 ? 'DISPENSAR_M1' : 'DISPENSAR_M2';
+    const respuesta = await enviarComandoBLE(comando);
 
-    if (!respuesta || respuesta === 'SIN_TOALLAS') {
-      Alert.alert('Sin toallas', 'El dispensador está vacío. Avisa al personal.');
-      setHayToallas(false);
+    if (!respuesta) {
+      Alert.alert('Error', 'No se pudo comunicar con el dispensador. Intenta de nuevo.');
       return;
     }
 
-    if (respuesta.startsWith('OK:')) {
-      const partes = respuesta.split(':');
-      setHayToallas(parseInt(partes[1]) + parseInt(partes[2]) > 0);
+    if (respuesta === 'SIN_TOALLAS') {
+      Alert.alert('Sin toallas', 'El dispensador está vacío. Avisa al personal.');
+      return;
+    }
+
+    if (respuesta === 'OK') {
+      // SQLite lleva la cuenta — descontar aquí
+      const nuevoInv = descontarToalla();
+      setInventario(nuevoInv);
 
       const fecha = new Date().toISOString().split('T')[0];
       guardarEntregaLocal(numDocumento, fecha);
@@ -330,7 +336,9 @@ export default function Home() {
                 <Text style={styles.statusEmoji}>✅</Text>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.statusTitle, { color: '#2E7D32' }]}>Kits disponibles</Text>
-                  <Text style={[styles.statusSub, { color: '#388E3C' }]}>Puedes solicitar tu kit ahora</Text>
+                  <Text style={[styles.statusSub, { color: '#388E3C' }]}>
+                    Puedes solicitar tu kit ahora
+                  </Text>
                 </View>
               </>
             ) : (
@@ -381,10 +389,10 @@ export default function Home() {
             <Ribbon color="white" size={42} strokeWidth={1.5} style={{ marginRight: 20 }} />
             <View style={styles.buttonTextContainer}>
               <Text style={styles.buttonTitle}>
-                {!bleConectado ? 'Desconectado' : !hayToallas ? 'Sin kits' : 'Saca tu Kit'}
+                {!hayToallas ? 'Sin kits' : !bleConectado ? 'Desconectado' : 'Saca tu Kit'}
               </Text>
               <Text style={styles.buttonSubtitle}>
-                {!bleConectado ? 'Conecta el dispensador primero' : !hayToallas ? 'Contacta al personal' : 'Toca para solicitar'}
+                {!hayToallas ? 'Contacta al personal' : !bleConectado ? 'Conecta el dispensador primero' : 'Toca para solicitar'}
               </Text>
             </View>
           </View>
@@ -421,44 +429,35 @@ const styles = StyleSheet.create({
   circle1: { position: 'absolute', width: 250, height: 250, borderRadius: 125, backgroundColor: '#F48FB1', opacity: 0.15, top: -80,  right: -50 },
   circle2: { position: 'absolute', width: 180, height: 180, borderRadius: 90,  backgroundColor: '#EC407A', opacity: 0.1,  bottom: 100, left: -40 },
   circle3: { position: 'absolute', width: 120, height: 120, borderRadius: 60,  backgroundColor: '#F8BBD0', opacity: 0.2,  top: 300,  left: 50  },
-
   header:          { alignItems: 'center', marginBottom: 20, zIndex: 10, gap: 8 },
   welcomeTitle:    { fontSize: 32, fontWeight: 'bold', color: '#C2185B', marginBottom: 4 },
   welcomeSubtitle: { fontSize: 16, color: '#EC407A', fontWeight: '500' },
-
   adminTab:     { backgroundColor: '#C2185B', borderRadius: 16, paddingVertical: 14, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 16, zIndex: 10, shadowColor: '#C2185B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 6 },
   adminTabText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
-
   messageCard: { backgroundColor: 'white', borderRadius: 20, padding: 20, flexDirection: 'row', alignItems: 'center', marginBottom: 16, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 4, zIndex: 10 },
   messageText: { flex: 1, fontSize: 15, color: '#C2185B', fontWeight: '500', lineHeight: 22 },
-
   loadingCard: { backgroundColor: 'white', borderRadius: 16, padding: 20, alignItems: 'center', marginBottom: 16, zIndex: 10, flexDirection: 'row', gap: 12, justifyContent: 'center' },
   loadingText: { color: '#EC407A', fontSize: 14 },
-
   statusCard:      { borderRadius: 16, padding: 18, flexDirection: 'row', alignItems: 'center', marginBottom: 16, zIndex: 10, borderWidth: 2 },
   statusCardOk:    { backgroundColor: '#E8F5E9', borderColor: '#66BB6A' },
   statusCardEmpty: { backgroundColor: '#FFEBEE', borderColor: '#EF5350' },
   statusEmoji:     { fontSize: 24, marginRight: 12 },
   statusTitle:     { fontSize: 16, fontWeight: 'bold', marginBottom: 2 },
   statusSub:       { fontSize: 13 },
-
   bleCard:    { borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16, borderWidth: 1.5, zIndex: 10 },
   bleCardOk:  { backgroundColor: '#E8F5E9', borderColor: '#66BB6A' },
   bleCardOff: { backgroundColor: '#FFF3E0', borderColor: '#FFA726' },
   bleTextOk:  { color: '#2E7D32', fontSize: 14, fontWeight: '500' },
   bleTextOff: { color: '#E65100', fontSize: 14, fontWeight: '500' },
-
   primaryButton:         { backgroundColor: '#EC407A', borderRadius: 24, padding: 28, marginBottom: 16, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.4, shadowRadius: 16, elevation: 8, zIndex: 10 },
   primaryButtonDisabled: { backgroundColor: '#BDBDBD', shadowOpacity: 0.2 },
   buttonContent:         { flexDirection: 'row', alignItems: 'center' },
   buttonTextContainer:   { flex: 1 },
   buttonTitle:           { fontSize: 26, fontWeight: 'bold', color: 'white', marginBottom: 6 },
   buttonSubtitle:        { fontSize: 15, color: '#FCE4EC', fontWeight: '500' },
-
   infoButton:         { backgroundColor: 'white', borderRadius: 24, padding: 24, borderWidth: 2, borderColor: '#F8BBD0', marginBottom: 32, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 4, zIndex: 10 },
   infoButtonTitle:    { fontSize: 22, fontWeight: 'bold', color: '#C2185B', marginBottom: 4 },
   infoButtonSubtitle: { fontSize: 14, color: '#F48FB1', fontWeight: '500' },
-
   logoutButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 16, backgroundColor: 'white', borderRadius: 16, borderWidth: 2, borderColor: '#F8BBD0', zIndex: 10 },
   logoutText:   { color: '#EC407A', fontWeight: 'bold', fontSize: 16 },
 });

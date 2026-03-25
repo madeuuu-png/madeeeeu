@@ -14,19 +14,22 @@ import {
 import { BleManager, Device, Subscription } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import { supabase } from '../lib/core/supabase/supabase';
+import {
+  obtenerInventario,
+  recargarInventario,
+  type Inventario,
+} from '../lib/core/dataBase/database';
 
 const SERVICE_UUID        = '12345678-1234-1234-1234-123456789abc';
 const CHARACTERISTIC_UUID = 'abcd1234-ab12-ab12-ab12-abcdef123456';
 const ESP32_MAC           = '08:D1:F9:C8:D5:3E';
 
-// Global igual que en home — no se destruye entre renders
 const bleManager = new BleManager();
 
 export default function Admin() {
   const router = useRouter();
 
-  const [motor1, setMotor1] = useState<number | null>(null);
-  const [motor2, setMotor2] = useState<number | null>(null);
+  const [inventario,    setInventario]    = useState<Inventario | null>(null);
   const [bleConectado,  setBleConectado]  = useState(false);
   const [bleConectando, setBleConectando] = useState(false);
   const dispositivoRef = useRef<Device | null>(null);
@@ -50,6 +53,10 @@ export default function Admin() {
     };
     verificar();
 
+    // Cargar inventario desde SQLite al abrir
+    const inv = obtenerInventario();
+    setInventario(inv);
+
     return () => { bleManager.stopDeviceScan(); };
   }, []);
 
@@ -57,15 +64,10 @@ export default function Admin() {
   const conectarBLE = async () => {
     if (bleConectando || bleConectado) return;
 
-    // Si ya hay dispositivo guardado, verificar si sigue conectado
     if (dispositivoRef.current) {
       try {
         const sigue = await dispositivoRef.current.isConnected();
-        if (sigue) {
-          setBleConectado(true);
-          pedirInventarioBLE(dispositivoRef.current);
-          return;
-        }
+        if (sigue) { setBleConectado(true); return; }
       } catch { /* nada */ }
       dispositivoRef.current = null;
     }
@@ -110,8 +112,8 @@ export default function Admin() {
       console.log('[BLE Admin] Dispositivo:', device?.name, '|', device?.localName, '| ID:', device?.id);
 
       const esPorMAC    = device?.id === ESP32_MAC;
-      const nombre      = device?.name || device?.localName || '';
-      const esPorNombre = nombre.includes('MAKANA');
+      const nombreDev   = device?.name || device?.localName || '';
+      const esPorNombre = nombreDev.includes('MAKANA');
 
       if (!esPorMAC && !esPorNombre) return;
 
@@ -128,12 +130,7 @@ export default function Admin() {
         conectado.onDisconnected(() => {
           setBleConectado(false);
           dispositivoRef.current = null;
-          setMotor1(null);
-          setMotor2(null);
         });
-
-        // Pedir inventario al conectarse
-        pedirInventarioBLE(conectado);
 
       } catch {
         setBleConectando(false);
@@ -145,39 +142,6 @@ export default function Admin() {
       bleManager.stopDeviceScan();
       setBleConectando(false);
     }, 12000);
-  };
-
-  // ── Pedir inventario al ESP32 ──────────────────────────────
-  const pedirInventarioBLE = async (device: Device) => {
-    try {
-      let suscripcion: Subscription | null = null;
-
-      const timeout = setTimeout(() => {
-        suscripcion?.remove();
-      }, 5000);
-
-      suscripcion = device.monitorCharacteristicForService(
-        SERVICE_UUID, CHARACTERISTIC_UUID,
-        (err, char) => {
-          clearTimeout(timeout);
-          suscripcion?.remove();
-          if (err || !char?.value) return;
-          const respuesta = Buffer.from(char.value, 'base64').toString('utf-8');
-          if (respuesta.startsWith('OK:')) {
-            const partes = respuesta.split(':');
-            setMotor1(parseInt(partes[1]));
-            setMotor2(parseInt(partes[2]));
-          }
-        }
-      );
-
-      await new Promise(r => setTimeout(r, 100));
-      await device.writeCharacteristicWithResponseForService(
-        SERVICE_UUID, CHARACTERISTIC_UUID,
-        Buffer.from('STATUS').toString('base64')
-      );
-
-    } catch { /* silencioso */ }
   };
 
   // ── Enviar comando BLE ─────────────────────────────────────
@@ -226,21 +190,21 @@ export default function Admin() {
     }
     Alert.alert(
       'Confirmar recarga',
-      '¿Confirmas que el dispensador fue recargado físicamente?',
+      '¿Confirmas que el dispensador fue recargado físicamente con 8+8 toallas?',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
           text: 'Sí, recargar',
           onPress: async () => {
-            const respuesta = await enviarComandoBLE('RECARGAR');
-            if (respuesta?.startsWith('RECARGADO:')) {
-              const partes = respuesta.split(':');
-              setMotor1(parseInt(partes[1]));
-              setMotor2(parseInt(partes[2]));
-              Alert.alert('✅ Listo', 'Inventario recargado a 8+8 toallas');
-            } else {
-              Alert.alert('Error', 'No se pudo comunicar con el dispensador');
-            }
+            // Avisar al ESP32 para que resetee su turno de motores
+            await enviarComandoBLE('RECARGAR');
+
+            // SQLite es la fuente de verdad
+            recargarInventario(8, 8);
+            const inv = obtenerInventario();
+            setInventario(inv);
+
+            Alert.alert('✅ Listo', 'Inventario recargado a 8+8 toallas');
           }
         }
       ]
@@ -317,8 +281,10 @@ export default function Admin() {
     finally { setGuardando(false); }
   };
 
-  const totalToallas = (motor1 ?? 0) + (motor2 ?? 0);
-  const sinToallas   = bleConectado && totalToallas === 0;
+  const motor1       = inventario?.motor1 ?? 0;
+  const motor2       = inventario?.motor2 ?? 0;
+  const totalToallas = motor1 + motor2;
+  const sinToallas   = totalToallas === 0;
 
   return (
     <ScrollView style={styles.scrollView}>
@@ -343,6 +309,46 @@ export default function Admin() {
             <Text style={styles.sectionTitle}>Inventario del dispensador</Text>
           </View>
 
+          {/* Alerta de estado — siempre visible, sin necesitar BLE */}
+          {sinToallas ? (
+            <View style={styles.alertCardRed}>
+              <AlertTriangle color="#C62828" size={22} style={{ marginRight: 10 }} />
+              <View>
+                <Text style={styles.alertTitleRed}>Dispensador vacío</Text>
+                <Text style={styles.alertSubRed}>Ambos motores en 0. Recarga urgente.</Text>
+              </View>
+            </View>
+          ) : totalToallas <= 4 ? (
+            <View style={styles.alertCardOrange}>
+              <AlertTriangle color="#E65100" size={22} style={{ marginRight: 10 }} />
+              <View>
+                <Text style={styles.alertTitleOrange}>Inventario bajo</Text>
+                <Text style={styles.alertSubOrange}>Quedan solo {totalToallas} toallas en total.</Text>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.alertCardGreen}>
+              <CheckCircle color="#2E7D32" size={22} style={{ marginRight: 10 }} />
+              <Text style={styles.alertTitleGreen}>Inventario OK — {totalToallas} toallas disponibles</Text>
+            </View>
+          )}
+
+          {/* Conteo por motor */}
+          <View style={styles.motorRow}>
+            <View style={styles.motorBox}>
+              <Text style={styles.motorLabel}>Motor 1</Text>
+              <Text style={[styles.motorNum, motor1 === 0 && styles.motorNumEmpty]}>{motor1}</Text>
+              <Text style={styles.motorSub}>toallas</Text>
+            </View>
+            <View style={styles.motorDivider} />
+            <View style={styles.motorBox}>
+              <Text style={styles.motorLabel}>Motor 2</Text>
+              <Text style={[styles.motorNum, motor2 === 0 && styles.motorNumEmpty]}>{motor2}</Text>
+              <Text style={styles.motorSub}>toallas</Text>
+            </View>
+          </View>
+
+          {/* BLE — solo para enviar RECARGAR al ESP32 */}
           <TouchableOpacity
             style={[styles.bleCard, bleConectado ? styles.bleCardOk : styles.bleCardOff]}
             onPress={conectarBLE}
@@ -362,60 +368,19 @@ export default function Admin() {
             ) : (
               <>
                 <BluetoothOff color="#E65100" size={20} style={{ marginRight: 10 }} />
-                <Text style={styles.bleTextOff}>Toca para conectar el dispensador</Text>
+                <Text style={styles.bleTextOff}>Conectar para enviar recarga al dispensador</Text>
               </>
             )}
           </TouchableOpacity>
 
-          {bleConectado && motor1 !== null && motor2 !== null ? (
-            <>
-              {sinToallas ? (
-                <View style={styles.alertCardRed}>
-                  <AlertTriangle color="#C62828" size={22} style={{ marginRight: 10 }} />
-                  <View>
-                    <Text style={styles.alertTitleRed}>Dispensador vacío</Text>
-                    <Text style={styles.alertSubRed}>Ambos motores en 0. Recarga urgente.</Text>
-                  </View>
-                </View>
-              ) : totalToallas <= 4 ? (
-                <View style={styles.alertCardOrange}>
-                  <AlertTriangle color="#E65100" size={22} style={{ marginRight: 10 }} />
-                  <View>
-                    <Text style={styles.alertTitleOrange}>Inventario bajo</Text>
-                    <Text style={styles.alertSubOrange}>Quedan solo {totalToallas} toallas en total.</Text>
-                  </View>
-                </View>
-              ) : (
-                <View style={styles.alertCardGreen}>
-                  <CheckCircle color="#2E7D32" size={22} style={{ marginRight: 10 }} />
-                  <Text style={styles.alertTitleGreen}>Inventario OK — {totalToallas} toallas disponibles</Text>
-                </View>
-              )}
-
-              <View style={styles.motorRow}>
-                <View style={styles.motorBox}>
-                  <Text style={styles.motorLabel}>Motor 1</Text>
-                  <Text style={[styles.motorNum, motor1 === 0 && styles.motorNumEmpty]}>{motor1}</Text>
-                  <Text style={styles.motorSub}>toallas</Text>
-                </View>
-                <View style={styles.motorDivider} />
-                <View style={styles.motorBox}>
-                  <Text style={styles.motorLabel}>Motor 2</Text>
-                  <Text style={[styles.motorNum, motor2 === 0 && styles.motorNumEmpty]}>{motor2}</Text>
-                  <Text style={styles.motorSub}>toallas</Text>
-                </View>
-              </View>
-
-              <TouchableOpacity style={styles.reloadBtn} onPress={marcarInventarioRecargado} activeOpacity={0.8}>
-                <RefreshCw color="white" size={20} style={{ marginRight: 10 }} />
-                <Text style={styles.reloadBtnText}>Marcar inventario como recargado</Text>
-              </TouchableOpacity>
-            </>
-          ) : bleConectado ? (
-            <ActivityIndicator color="#EC407A" style={{ marginVertical: 16 }} />
-          ) : (
-            <Text style={styles.emptyText}>Conecta el dispensador para ver el inventario</Text>
-          )}
+          <TouchableOpacity
+            style={[styles.reloadBtn, !bleConectado && styles.reloadBtnDisabled]}
+            onPress={marcarInventarioRecargado}
+            activeOpacity={0.8}
+          >
+            <RefreshCw color="white" size={20} style={{ marginRight: 10 }} />
+            <Text style={styles.reloadBtnText}>Marcar inventario como recargado</Text>
+          </TouchableOpacity>
         </View>
 
         {/* ── HISTORIAL ── */}
@@ -561,21 +526,17 @@ const styles = StyleSheet.create({
   container:  { flex: 1, padding: 24, paddingTop: 60, paddingBottom: 40 },
   circle1: { position: 'absolute', width: 250, height: 250, borderRadius: 125, backgroundColor: '#F48FB1', opacity: 0.12, top: -80,  right: -50 },
   circle2: { position: 'absolute', width: 200, height: 200, borderRadius: 100, backgroundColor: '#EC407A', opacity: 0.08, bottom: 100, left: -60 },
-
   header:      { flexDirection: 'row', alignItems: 'center', marginBottom: 24, zIndex: 10 },
   backBtn:     { width: 40, height: 40, borderRadius: 20, backgroundColor: 'white', justifyContent: 'center', alignItems: 'center', marginRight: 12, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 4, elevation: 3 },
   headerTitle: { fontSize: 26, fontWeight: 'bold', color: '#C2185B' },
-
   sectionCard:   { backgroundColor: 'white', borderRadius: 20, padding: 20, marginBottom: 16, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 4, zIndex: 10 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
   sectionTitle:  { fontSize: 18, fontWeight: 'bold', color: '#C2185B' },
-
   bleCard:    { borderRadius: 12, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12, borderWidth: 1.5 },
   bleCardOk:  { backgroundColor: '#E8F5E9', borderColor: '#66BB6A' },
   bleCardOff: { backgroundColor: '#FFF3E0', borderColor: '#FFA726' },
   bleTextOk:  { color: '#2E7D32', fontSize: 14, fontWeight: '500' },
   bleTextOff: { color: '#E65100', fontSize: 14, fontWeight: '500' },
-
   alertCardRed:    { backgroundColor: '#FFEBEE', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#EF5350' },
   alertTitleRed:   { fontSize: 15, fontWeight: 'bold', color: '#C62828' },
   alertSubRed:     { fontSize: 13, color: '#D32F2F', marginTop: 2 },
@@ -584,7 +545,6 @@ const styles = StyleSheet.create({
   alertSubOrange:  { fontSize: 13, color: '#EF6C00', marginTop: 2 },
   alertCardGreen:  { backgroundColor: '#E8F5E9', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', marginBottom: 12, borderWidth: 1.5, borderColor: '#66BB6A' },
   alertTitleGreen: { fontSize: 14, fontWeight: 'bold', color: '#2E7D32' },
-
   motorRow:      { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', marginBottom: 16 },
   motorBox:      { alignItems: 'center', flex: 1 },
   motorLabel:    { fontSize: 14, color: '#F48FB1', fontWeight: '600', marginBottom: 4 },
@@ -592,27 +552,22 @@ const styles = StyleSheet.create({
   motorNumEmpty: { color: '#BDBDBD' },
   motorSub:      { fontSize: 12, color: '#F48FB1' },
   motorDivider:  { width: 2, height: 60, backgroundColor: '#F8BBD0' },
-
-  reloadBtn:     { backgroundColor: '#C2185B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', shadowColor: '#C2185B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  reloadBtn:         { backgroundColor: '#C2185B', borderRadius: 14, paddingVertical: 14, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', shadowColor: '#C2185B', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
+  reloadBtnDisabled: { backgroundColor: '#BDBDBD', shadowOpacity: 0.1, elevation: 0 },
   reloadBtnText: { color: 'white', fontWeight: 'bold', fontSize: 15 },
-
   historialItem:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FCE4EC' },
   historialNombre: { fontSize: 14, fontWeight: '600', color: '#C2185B' },
   historialDoc:    { fontSize: 12, color: '#F48FB1', marginTop: 2 },
   historialFecha:  { fontSize: 12, color: '#EC407A', fontWeight: '600' },
   emptyText:       { color: '#F48FB1', fontSize: 14, textAlign: 'center', paddingVertical: 12 },
-
   addBtn:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#FCE4EC', borderRadius: 12, paddingVertical: 12, marginTop: 4, borderWidth: 1.5, borderColor: '#F8BBD0' },
   addBtnText: { color: '#C2185B', fontWeight: 'bold', fontSize: 14 },
-
   estudianteItem:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#FCE4EC' },
   estudianteNombre: { fontSize: 14, fontWeight: '600', color: '#C2185B' },
   estudianteDoc:    { fontSize: 12, color: '#F48FB1', marginTop: 2 },
   deleteBtn:        { width: 36, height: 36, borderRadius: 10, backgroundColor: '#FFEBEE', justifyContent: 'center', alignItems: 'center' },
-
   backBottomBtn:  { backgroundColor: '#EC407A', borderRadius: 16, padding: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 8, shadowColor: '#EC407A', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4, zIndex: 10 },
   backBottomText: { color: 'white', fontSize: 16, fontWeight: 'bold' },
-
   modalOverlay:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
   modalCard:       { backgroundColor: 'white', borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 28, paddingBottom: 40 },
   modalHeader:     { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },

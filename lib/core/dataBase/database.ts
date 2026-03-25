@@ -1,6 +1,7 @@
 // ============================================================
 //  database.ts — SQLite local para Makana
 //  Tablas: cedulas (login offline) + entregas (historial offline)
+//          + inventario (conteo de toallas por motor)
 // ============================================================
 
 import * as SQLite from 'expo-sqlite';
@@ -15,6 +16,8 @@ export type Entrega = {
   fecha:        string;
   sincronizado: number;
 };
+
+export type Inventario = { motor1: number; motor2: number };
 
 // Lista completa de cédulas pre-cargadas
 const CEDULAS_INICIALES = [
@@ -227,11 +230,19 @@ export function inicializarDB(): void {
     );
   `);
 
-  // Inserta las cédulas solo si la tabla está vacía
+  // Tabla inventario — una sola fila con id = 1
+  db.execSync(`
+    CREATE TABLE IF NOT EXISTS inventario (
+      id     INTEGER PRIMARY KEY CHECK (id = 1),
+      motor1 INTEGER DEFAULT 8,
+      motor2 INTEGER DEFAULT 8
+    );
+  `);
+
+  // Cédulas: insertar solo si está vacía
   const conteo = db.getFirstSync<{ total: number }>(
     `SELECT COUNT(*) as total FROM cedulas`
   );
-
   if (conteo?.total === 0) {
     for (const ced of CEDULAS_INICIALES) {
       db.runSync(
@@ -240,6 +251,15 @@ export function inicializarDB(): void {
       );
     }
     console.log(`✅ ${CEDULAS_INICIALES.length} cédulas cargadas en SQLite`);
+  }
+
+  // Inventario: insertar fila inicial solo si no existe
+  const inv = db.getFirstSync<{ total: number }>(
+    `SELECT COUNT(*) as total FROM inventario`
+  );
+  if (inv?.total === 0) {
+    db.runSync(`INSERT INTO inventario (id, motor1, motor2) VALUES (1, 8, 8)`);
+    console.log('✅ Inventario inicializado: 8+8 toallas');
   }
 
   console.log('✅ SQLite inicializado');
@@ -255,7 +275,6 @@ export function existeCedulaLocal(numDocumento: string): boolean {
   );
   return resultado !== null;
 }
-
 
 // ============================================================
 //  ENTREGAS — guardar local (siempre, con o sin internet)
@@ -320,4 +339,45 @@ export async function sincronizarConSupabase(): Promise<void> {
 // ============================================================
 export function listarEntregas(): Entrega[] {
   return db.getAllSync<Entrega>(`SELECT * FROM entregas ORDER BY id DESC`);
+}
+
+// ============================================================
+//  INVENTARIO — leer estado actual
+// ============================================================
+export function obtenerInventario(): Inventario {
+  const row = db.getFirstSync<Inventario>(
+    `SELECT motor1, motor2 FROM inventario WHERE id = 1`
+  );
+  return row ?? { motor1: 0, motor2: 0 };
+}
+
+// ============================================================
+//  INVENTARIO — descontar 1 toalla
+//  Lógica: agota motor1 primero, luego pasa a motor2
+// ============================================================
+export function descontarToalla(): Inventario {
+  const { motor1, motor2 } = obtenerInventario();
+
+  if (motor1 > 0) {
+    db.runSync(`UPDATE inventario SET motor1 = motor1 - 1 WHERE id = 1`);
+    console.log(`📦 Toalla descontada de Motor1. Quedan: ${motor1 - 1}`);
+  } else if (motor2 > 0) {
+    db.runSync(`UPDATE inventario SET motor2 = motor2 - 1 WHERE id = 1`);
+    console.log(`📦 Toalla descontada de Motor2. Quedan: ${motor2 - 1}`);
+  } else {
+    console.log('⚠️ Sin toallas para descontar');
+  }
+
+  return obtenerInventario();
+}
+
+// ============================================================
+//  INVENTARIO — recargar (solo admins)
+// ============================================================
+export function recargarInventario(motor1 = 8, motor2 = 8): void {
+  db.runSync(
+    `UPDATE inventario SET motor1 = ?, motor2 = ? WHERE id = 1`,
+    [motor1, motor2]
+  );
+  console.log(`✅ Inventario recargado: M1=${motor1} M2=${motor2}`);
 }
