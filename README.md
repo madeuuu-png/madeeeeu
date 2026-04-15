@@ -1,53 +1,92 @@
- > Edited for use in IDX on 07/09/12
+# 📱 MAKANA - App Móvil
 
-# Welcome to your Expo app 👋
+Aplicación móvil desarrollada con React Native + Expo Router para controlar un dispensador automatizado de productos de higiene femenina en instituciones educativas.
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+---
 
-## Get started
+## 🚀 Funcionalidades
 
-#### Android
+- 🔐 Login por cédula
+- 👤 Validación de estudiantes
+- 📦 Solicitud de productos (kits)
+- 📊 Visualización de inventario
+- 📡 Comunicación con ESP32 vía Bluetooth
+- 🧠 Control de comandos hacia el dispensador
+- 🛠 Panel de administrador
 
-Android previews are defined as a `workspace.onStart` hook and started as a vscode task when the workspace is opened/started.
+---
 
-Note, if you can't find the task, either:
-- Rebuild the environment (using command palette: `IDX: Rebuild Environment`), or
-- Run `npm run android -- --tunnel` command manually run android and see the output in your terminal. The device should pick up this new command and switch to start displaying the output from it.
+## 🧱 Estructura del Proyecto
 
-In the output of this command/task, you'll find options to open the app in a
+---pp/
+├── index.tsx
+├── home.tsx
+├── admin.tsx
+├── informacion.tsx
+├── recuperarCedula.tsx
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+components/
+├── layout/
+├── ui/
+│ ├── home/
+│ └── informacion/
 
-You'll also find options to open the app's developer menu, reload the app, and more.
+lib/
+├── constants/
+├── core/
+│ ├── dataBase/
+│ └── storage/
+├── supabase/
 
-#### Web
+hooks/
+├── useAuth.ts
+├── useAdmin.ts
+├── useBle.ts
+├── useInventario.ts
 
-Web previews will be started and managred automatically. Use the toolbar to manually refresh.
+## 🧠 Arquitectura
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+El proyecto sigue una estructura modular:
 
-## Get a fresh project
+- **app/** → pantallas principales (routing)
+- **components/** → UI reutilizable
+- **lib/** → lógica, datos y servicios
+- **hooks/** → lógica reutilizable (estado y funciones)
 
-When you're ready, run:
+---
 
-```bash
-npm run reset-project
-```
+## 🔌 Tecnologías
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+- React Native
+- Expo Router
+- TypeScript
+- Supabase
+- Bluetooth Low Energy (BLE)
+- ESP32
 
-## Learn more
+---
 
-To learn more about developing your project with Expo, look at the following resources:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## 📡 Integración con Hardware
 
-## Join the community
+La app se conecta a un ESP32 mediante BLE para enviar comandos al dispensador.
 
-Join our community of developers creating universal apps.
+---
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## 👨‍💻 Equipo
+
+- Kayle Darhyle Culcay Verdugo  
+- Madelayne Cristina Palomino Sinche  
+- Nayeli Alejandra Peralta Bravo  
+
+---
+
+## 🎯 Objetivo
+
+Brindar acceso rápido, seguro y digno a productos de higiene femenina mediante tecnología automatizada.
+
+---
+
+## 📌 Notas
+
+Proyecto desarrollado como parte de un proyecto integrador académico.
