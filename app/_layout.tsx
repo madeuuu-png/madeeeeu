@@ -4,7 +4,7 @@ global.Buffer = Buffer;
 
 import { Stack } from "expo-router";
 import { useEffect } from "react";
-import { inicializarDB } from '../lib/core/dataBase/database';
+import { inicializarDB } from '../lib/core/dataBase';
 
 export default function RootLayout() {
 
