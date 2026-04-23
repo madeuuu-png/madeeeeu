@@ -34,13 +34,13 @@ export default function Home() {
 
   const hayToallas = inventario.motor1 + inventario.motor2 > 0;
 
-  // ── Carga inicial (Corregido para evitar error de tipos async) ──
+  // ── Carga inicial ──────────────────────────────────────────────
   useEffect(() => {
     const inicializarDatos = async () => {
       try {
         const doc = await storageAdapter.getItem('numDocumento');
         const adminFlag = await storageAdapter.getItem('esAdmin');
-        
+
         setEsAdmin(adminFlag === 'true');
 
         if (!doc) return;
@@ -57,19 +57,19 @@ export default function Home() {
 
         if (data) setNombre(data.NombreCompleto);
       } catch (error) {
-        console.error("Error cargando datos iniciales:", error);
+        console.error('Error cargando datos iniciales:', error);
       }
     };
 
     inicializarDatos();
+    conectar(); // ← se conecta sola al entrar
 
-    // Función de limpieza (Cleanup)
     return () => {
       detener();
     };
   }, []);
 
-  // ── Sacar kit ─────────────────────────────────────────────────
+  // ── Sacar kit ──────────────────────────────────────────────────
   const handleSacarKit = async () => {
     if (!numDocumento) {
       Alert.alert('Error', 'No se encontró tu número de documento');
@@ -88,14 +88,15 @@ export default function Home() {
       return;
     }
 
-    const comando = inventario.motor1 > 0 ? 'DISPENSAR_M1' : 'DISPENSAR_M2';
+    // '1' → motor1, '2' → motor2
+    const comando = inventario.motor1 > 0 ? '1' : '2';
     const respuesta = await enviarComando(comando);
 
     if (!respuesta) {
       Alert.alert('Error', 'No se pudo comunicar con el dispensador. Intenta de nuevo.');
-    } else if (respuesta === 'SIN_TOALLAS') {
+    } else if (respuesta === 'S') {
       Alert.alert('Sin toallas', 'El dispensador está vacío. Avisa al personal.');
-    } else if (respuesta === 'OK_M1' || respuesta === 'OK_M2') {
+    } else if (respuesta === 'A' || respuesta === 'B') {
       registrarEntrega();
       Alert.alert('✅ ¡Listo!', 'Tu kit fue dispensado. ¡Cuídate mucho!');
     } else {
@@ -103,7 +104,7 @@ export default function Home() {
     }
   };
 
-  // ── Logout ────────────────────────────────────────────────────
+  // ── Logout ─────────────────────────────────────────────────────
   const handleLogout = async () => {
     await storageAdapter.removeItem('numDocumento');
     await storageAdapter.removeItem('esAdmin');
@@ -111,7 +112,7 @@ export default function Home() {
     router.replace('/');
   };
 
-  // ── Render ────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────
   return (
     <ScrollView style={styles.scrollView}>
       <View style={styles.container}>
@@ -170,72 +171,72 @@ export default function Home() {
 }
 
 const styles = StyleSheet.create({
-  scrollView: { 
-    flex: 1, 
-    backgroundColor: '#FCE4EC' 
+  scrollView: {
+    flex: 1,
+    backgroundColor: '#FCE4EC',
   },
-  container: { 
-    flex: 1, 
-    padding: 24, 
-    paddingTop: 60, 
-    paddingBottom: 40 
+  container: {
+    flex: 1,
+    padding: 24,
+    paddingTop: 60,
+    paddingBottom: 40,
   },
-  adminTab: { 
-    backgroundColor: '#C2185B', 
-    borderRadius: 16, 
-    paddingVertical: 14, 
-    paddingHorizontal: 20, 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    justifyContent: 'center', 
-    marginBottom: 16, 
-    zIndex: 10, 
-    shadowColor: '#C2185B', 
-    shadowOffset: { width: 0, height: 4 }, 
-    shadowOpacity: 0.3, 
-    shadowRadius: 8, 
-    elevation: 6 
+  adminTab: {
+    backgroundColor: '#C2185B',
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+    zIndex: 10,
+    shadowColor: '#C2185B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
   },
-  adminTabText: { 
-    color: 'white', 
-    fontWeight: 'bold', 
-    fontSize: 16 
+  adminTabText: {
+    color: 'white',
+    fontWeight: 'bold',
+    fontSize: 16,
   },
-  messageCard: { 
-    backgroundColor: 'white', 
-    borderRadius: 20, 
-    padding: 20, 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    marginBottom: 16, 
-    shadowColor: '#EC407A', 
-    shadowOffset: { width: 0, height: 4 }, 
-    shadowOpacity: 0.15, 
-    shadowRadius: 8, 
-    elevation: 4, 
-    zIndex: 10 
+  messageCard: {
+    backgroundColor: 'white',
+    borderRadius: 20,
+    padding: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    shadowColor: '#EC407A',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 4,
+    zIndex: 10,
   },
-  messageText: { 
-    flex: 1, 
-    fontSize: 15, 
-    color: '#C2185B', 
-    fontWeight: '500', 
-    lineHeight: 22 
+  messageText: {
+    flex: 1,
+    fontSize: 15,
+    color: '#C2185B',
+    fontWeight: '500',
+    lineHeight: 22,
   },
-  logoutButton: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    justifyContent: 'center', 
-    padding: 16, 
-    backgroundColor: 'white', 
-    borderRadius: 16, 
-    borderWidth: 2, 
-    borderColor: '#F8BBD0', 
-    zIndex: 10 
+  logoutButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+    backgroundColor: 'white',
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: '#F8BBD0',
+    zIndex: 10,
   },
-  logoutText: { 
-    color: '#EC407A', 
-    fontWeight: 'bold', 
-    fontSize: 16 
+  logoutText: {
+    color: '#EC407A',
+    fontWeight: 'bold',
+    fontSize: 16,
   },
 });
