@@ -5,7 +5,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
 import { History, ChevronDown, ChevronUp } from 'lucide-react-native';
-import type { HistorialItem } from '../../hooks/useAdmin';
+import type { HistorialItem } from '../../lib/hooks/useAdmin';
 
 type Props = {
   historial: HistorialItem[];
