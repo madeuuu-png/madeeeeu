@@ -1,4 +1,4 @@
-export const HC05_NAME = 'MAKANA';
+export const HC05_NAME = 'HC-05';
 export const RESPONSE_TIMEOUT_MS = 7000;
 
 // Comandos — una letra
