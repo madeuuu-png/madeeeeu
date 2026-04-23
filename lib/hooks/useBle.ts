@@ -1,134 +1,123 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { Alert, PermissionsAndroid, Platform } from 'react-native';
-import { BleManager, Device, Subscription } from 'react-native-ble-plx';
-import { Buffer } from 'buffer';
-import {
-  SERVICE_UUID, CHARACTERISTIC_UUID, ESP32_MAC,
-  BLE_RESPONSE_TIMEOUT_MS, BLE_SUBSCRIBE_DELAY_MS,
-} from '@/lib/constants/ble';
-
-const bleManager = new BleManager();
+import RNBluetoothClassic from 'react-native-bluetooth-classic';
+import { HC05_NAME, RESPONSE_TIMEOUT_MS } from '@/lib/constants/bluetooth';
 
 export function useBle() {
   const [conectado,  setConectado]  = useState(false);
   const [conectando, setConectando] = useState(false);
-  const dispositivoRef = useRef<Device | null>(null);
+  const deviceRef = useRef<any>(null);
+  const listenerRef = useRef<any>(null);
 
-  // ── Permisos + escaneo ────────────────────────────────────────
+  useEffect(() => {
+    return () => { listenerRef.current?.remove(); };
+  }, []);
+
   const conectar = async () => {
     if (conectando || conectado) return;
 
-    if (dispositivoRef.current) {
+    if (deviceRef.current) {
       try {
-        const sigue = await dispositivoRef.current.isConnected();
+        const sigue = await deviceRef.current.isConnected();
         if (sigue) { setConectado(true); return; }
-      } catch { /* nada */ }
-      dispositivoRef.current = null;
+      } catch {}
+      deviceRef.current = null;
     }
 
     if (Platform.OS === 'android') {
-      const granted = await PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+      const grants = await PermissionsAndroid.requestMultiple([
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
         PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
       ]);
-      const todosOk = Object.values(granted).every(
+      const todosOk = Object.values(grants).every(
         v => v === PermissionsAndroid.RESULTS.GRANTED
       );
       if (!todosOk) {
-        Alert.alert('Permisos', 'Activa Bluetooth y Ubicación en ajustes de la app.');
+        Alert.alert('Permisos', 'Activa Bluetooth y Ubicación en ajustes.');
         return;
       }
-    }
-
-    await _escanear();
-  };
-
-  const _escanear = async () => {
-    const estado = await bleManager.state();
-    if (estado !== 'PoweredOn') {
-      Alert.alert('Bluetooth apagado', 'Activa el Bluetooth e intenta de nuevo.');
-      return;
     }
 
     setConectando(true);
+    try {
+      const paired = await RNBluetoothClassic.getBondedDevices();
+      
+      // Busca por nombre — sin necesitar la MAC
+      const hc05 = paired.find(d =>
+        d.name?.toUpperCase().includes(HC05_NAME.toUpperCase())
+      );
 
-    bleManager.startDeviceScan([SERVICE_UUID], null, async (error, device) => {
-      if (error) {
+      if (!hc05) {
+        Alert.alert(
+          'Dispensador no encontrado',
+          `Asegúrate de haber emparejado "${HC05_NAME}" en los ajustes Bluetooth del celular.`
+        );
         setConectando(false);
-        Alert.alert('Error Bluetooth', error.message);
         return;
       }
 
-      const nombreDev = device?.name || device?.localName || '';
-      if (device?.id !== ESP32_MAC && !nombreDev.includes('MAKANA')) return;
+      const device = await RNBluetoothClassic.connectToDevice(hc05.address);
+      deviceRef.current = device;
+      setConectado(true);
+      console.log(`✅ Conectado a ${hc05.name}`);
 
-      bleManager.stopDeviceScan();
-
-      try {
-        const conectado = await device!.connect();
-        await new Promise(r => setTimeout(r, 500));
-        await conectado.discoverAllServicesAndCharacteristics();
-        dispositivoRef.current = conectado;
-        setConectado(true);
-        setConectando(false);
-        conectado.onDisconnected(() => {
+      listenerRef.current?.remove();
+      listenerRef.current = RNBluetoothClassic.onDeviceDisconnected((event) => {
+        if (event.device?.address === hc05.address) {
+          console.log('🔴 HC-05 desconectado');
           setConectado(false);
-          dispositivoRef.current = null;
-        });
-      } catch {
-        setConectando(false);
-        Alert.alert('Error', 'No se pudo conectar. Reinicia el ESP32 e intenta de nuevo.');
-      }
-    });
+          deviceRef.current = null;
+          listenerRef.current?.remove();
+          listenerRef.current = null;
+        }
+      });
 
-    setTimeout(() => {
-      bleManager.stopDeviceScan();
+    } catch (e: any) {
+      console.log('❌ Error BT:', e?.message);
+    } finally {
       setConectando(false);
-    }, 12_000);
+    }
   };
 
-  // ── Enviar comando ────────────────────────────────────────────
   const enviarComando = (comando: string): Promise<string | null> =>
     new Promise(async (resolve) => {
-      const device = dispositivoRef.current;
+      const device = deviceRef.current;
       if (!device) return resolve(null);
 
-      let suscripcion: Subscription | null = null;
       let resuelto = false;
-
       const timeout = setTimeout(() => {
-        if (!resuelto) { resuelto = true; suscripcion?.remove(); resolve(null); }
-      }, BLE_RESPONSE_TIMEOUT_MS);
+        if (!resuelto) { resuelto = true; resolve(null); }
+      }, RESPONSE_TIMEOUT_MS);
 
       try {
-        suscripcion = device.monitorCharacteristicForService(
-          SERVICE_UUID, CHARACTERISTIC_UUID,
-          (err, char) => {
-            if (resuelto) return;
-            resuelto = true;
-            clearTimeout(timeout);
-            suscripcion?.remove();
-            if (err || !char?.value) return resolve(null);
-            resolve(Buffer.from(char.value, 'base64').toString('utf-8'));
-          }
-        );
-        await new Promise(r => setTimeout(r, BLE_SUBSCRIBE_DELAY_MS));
-        await device.writeCharacteristicWithResponseForService(
-          SERVICE_UUID, CHARACTERISTIC_UUID,
-          Buffer.from(comando).toString('base64')
-        );
+        await device.write(comando + '\n');
+        const respuesta = await device.read();
+        if (!resuelto) {
+          resuelto = true;
+          clearTimeout(timeout);
+          resolve(respuesta?.trim() ?? null);
+        }
       } catch {
         if (!resuelto) {
           resuelto = true;
           clearTimeout(timeout);
-          suscripcion?.remove();
           resolve(null);
         }
       }
     });
 
-  const detener = () => bleManager.stopDeviceScan();
+  const detener = async () => {
+    listenerRef.current?.remove();
+    listenerRef.current = null;
+    try {
+      if (deviceRef.current) {
+        await deviceRef.current.disconnect();
+        deviceRef.current = null;
+      }
+    } catch {}
+    setConectado(false);
+  };
 
   return { conectado, conectando, conectar, enviarComando, detener };
 }

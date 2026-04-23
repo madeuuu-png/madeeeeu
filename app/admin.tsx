@@ -3,7 +3,7 @@
 //  Solo orquesta: toda la lógica vive en hooks/useAdmin.ts
 // ============================================================
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { storageAdapter } from '@/lib/core/storage/storage.adapter';
 import { useRouter, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
@@ -24,7 +24,7 @@ export default function Admin() {
 
   // Redirige si no es admin
   useEffect(() => {
-    AsyncStorage.getItem('esAdmin').then(flag => {
+    storageAdapter.getItem('esAdmin').then(flag => {
       if (flag !== 'true') router.replace('/home');
     });
   }, []);

@@ -1,7 +1,7 @@
 import { View, Text, TouchableOpacity, ScrollView, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { ArrowLeft, Home, LogOut } from 'lucide-react-native';
-
+import { storageAdapter } from '@/lib/core/storage/storage.adapter';
 import HeroCard      from '../components/ui/informacion/HeroCard';
 import InfoCard      from '../components/ui/informacion/InfoCard';
 import EmergencyCard from '../components/ui/informacion/EmergencyCard';
@@ -11,7 +11,11 @@ import { INFO_SECTIONS } from '../components/ui/informacion/constants';
 
 export default function Informacion() {
   const router = useRouter();
-
+const handleLogout = async () => {
+  await storageAdapter.removeItem('numDocumento');
+  await storageAdapter.removeItem('esAdmin');
+  router.replace('/');
+};
   return (
     <ScrollView style={styles.scrollView}>
       <View style={styles.container}>
@@ -55,7 +59,7 @@ export default function Informacion() {
         </TouchableOpacity>
 
         {/* Cerrar sesión */}
-        <TouchableOpacity style={styles.logoutButton} onPress={() => router.replace('/')} activeOpacity={0.7}>
+        <TouchableOpacity  style={styles.logoutButton} onPress={handleLogout} activeOpacity={0.7}>
           <LogOut color="#EC407A" size={20} style={{ marginRight: 8 }} />
           <Text style={styles.logoutText}>Cerrar sesión</Text>
         </TouchableOpacity>

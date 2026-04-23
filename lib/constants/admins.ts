@@ -1,3 +1,4 @@
+//../lib/constants/admints.ts
 export const ADMINS = [
     "0105181424",
     "0106650344",
