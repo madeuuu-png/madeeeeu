@@ -8,4 +8,4 @@ export const CMD_M2 = '2';
 // Respuestas esperadas
 export const RES_OK_M1 = 'A';
 export const RES_OK_M2 = 'B';
-export const RES_SIN_TOALLAS = 'S';
+export const RES_SIN_TOALLAS = 'S'; 

@@ -62,7 +62,7 @@ export default function Home() {
     };
 
     inicializarDatos();
-    conectar(); // ← se conecta sola al entrar
+    conectar();
 
     return () => {
       detener();
@@ -90,18 +90,16 @@ export default function Home() {
 
     // '1' → motor1, '2' → motor2
     const comando = inventario.motor1 > 0 ? '1' : '2';
-    const respuesta = await enviarComando(comando);
+    const enviado = await enviarComando(comando);
 
-    if (!respuesta) {
+    if (!enviado) {
       Alert.alert('Error', 'No se pudo comunicar con el dispensador. Intenta de nuevo.');
-    } else if (respuesta === 'S') {
-      Alert.alert('Sin toallas', 'El dispensador está vacío. Avisa al personal.');
-    } else if (respuesta === 'A' || respuesta === 'B') {
-      registrarEntrega();
-      Alert.alert('✅ ¡Listo!', 'Tu kit fue dispensado. ¡Cuídate mucho!');
-    } else {
-      Alert.alert('Error', 'El dispensador no respondió correctamente');
+      return;
     }
+
+    // Si se envió correctamente, registramos la entrega y mostramos éxito
+    registrarEntrega();
+    Alert.alert('✅ ¡Listo!', 'Tu kit fue dispensado. ¡Cuídate mucho!');
   };
 
   // ── Logout ─────────────────────────────────────────────────────

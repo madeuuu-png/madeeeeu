@@ -18,7 +18,7 @@ Aplicación móvil desarrollada con React Native + Expo Router para controlar un
 
 ## 🧱 Estructura del Proyecto
 
----pp/
+---App/
 ├── index.tsx
 ├── home.tsx
 ├── admin.tsx
